@@ -308,6 +308,28 @@ def main():
                 if eh_inedito:
                     encontrados += 1
                     timestamp_solucao = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    metodo_inicial_nome = (
+                        "Hipercubo [-L, L]³ (Teorema 1)"
+                        if opcao_inicializacao == "1"
+                        else (
+                            "Projeção Esferográfica (pura)"
+                            if rep == 1
+                            else f"Projeção Esferográfica (perturbação ε={epsilon_perturbacao})"
+                        )
+                    )
+                    info_execucao = {
+                        "metodo_inicial": metodo_inicial_nome,
+                        "codigo_metodo_inicial": opcao_inicializacao,
+                        "lado_L": round(float(L_topologico), 6),
+                        "epsilon_perturbacao": float(epsilon_perturbacao) if opcao_inicializacao == "2" else None,
+                        "tamanho_amostra": m,
+                        "tentativa": int(rep),
+                        "iteracoes_otimizador": int(resultado.get("it", 0)),
+                        "tempo_segundos": round(float(elapsed), 4),
+                        "norm_grad": float(norm_g),
+                        "converged": bool(converged),
+                        "vc_inicial": vc_inicial.tolist() if hasattr(vc_inicial, "tolist") else [list(v) for v in vc_inicial],
+                    }
                     gerenciador_solucoes.salvar_arquivos_solucao(
                         nome_solucao=nome_solucao,
                         tipo=tipo,
@@ -321,7 +343,8 @@ def main():
                         tem_autointersecao=tem_autointersecao,
                         info_convexidade=info_convexidade,
                         info_autointersecao=info_autointersecao,
-                        timestamp=timestamp_solucao
+                        timestamp=timestamp_solucao,
+                        info_execucao=info_execucao,
                     )
                     print("  Configuração geométrica inédita registrada com sucesso.")
 

@@ -167,6 +167,7 @@ class GerenciadorSolucoes:
         info_convexidade=None,
         info_autointersecao=None,
         timestamp=None,
+        info_execucao=None,
     ):
         """
         Gera os arquivos estruturados JSON e TXT contendo todos os detalhes da solução.
@@ -230,6 +231,11 @@ class GerenciadorSolucoes:
             dados["convexidade"] = convexidade_serializada
         if info_autointersecao is not None:
             dados["autointersecao"] = info_autointersecao
+        if info_execucao is not None:
+            exec_clean = dict(info_execucao)
+            if "vc_inicial" in exec_clean and hasattr(exec_clean["vc_inicial"], "tolist"):
+                exec_clean["vc_inicial"] = exec_clean["vc_inicial"].tolist()
+            dados["execucao"] = exec_clean
 
         with open(json_path, "w", encoding="utf-8") as f:
             json.dump(dados, f, indent=4, ensure_ascii=False)
@@ -243,6 +249,17 @@ class GerenciadorSolucoes:
                 label_inter = "Com autointerseção de faces" if tem_autointersecao else "Sem autointerseção de faces"
                 f.write(f"Classificação geométrica: {label_conv} ({label_inter})\n")
             f.write(f"Valor da função objetivo (fval): {fval:.6e}\n")
+            if info_execucao is not None:
+                metodo_lbl = info_execucao.get("metodo_inicial") or "Não informado"
+                amostra_val = info_execucao.get("tamanho_amostra")
+                amostra_lbl = "Ilimitada" if amostra_val is None else str(amostra_val)
+                tentativa_val = info_execucao.get("tentativa")
+                iters_val = info_execucao.get("iteracoes_otimizador")
+                tempo_val = info_execucao.get("tempo_segundos")
+                f.write(f"Condição inicial (método): {metodo_lbl}\n")
+                f.write(f"Tamanho da amostra: {amostra_lbl} | Tentativa necessária: {tentativa_val if tentativa_val is not None else '—'}\n")
+                if iters_val is not None or tempo_val is not None:
+                    f.write(f"Convergência: {iters_val if iters_val is not None else '—'} iterações | Tempo: {tempo_val if tempo_val is not None else '—'}s\n")
             if convexidade_serializada is not None:
                 f.write(
                     f"Volume / Volume Envoltória Convexa: "

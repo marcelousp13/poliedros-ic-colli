@@ -95,27 +95,113 @@ def iter_global_category_dirs(solid_dir: Path) -> List[Tuple[Optional[str], Path
 
 
 # ==============================================================================
-# NOMENCLATURA CIENTÍFICA COMPLETA (PLATÔNICOS, ARQUIMEDIANOS, PRISMAS, J1–J92)
+# NOMENCLATURA CIENTÍFICA COMPLETA (PLATÔNICOS, ARQUIMEDIANOS, PRISMAS, ANTIPRISMAS, J1–J92)
+# E CLASSIFICAÇÃO RIGOROSA DE POLIEDROS ELEMENTARES (ZALGALLER, 1969; JOHNSON, 1966)
 # ==============================================================================
+ELEMENTARY_JOHNSON_IDS = frozenset({
+    1, 2, 3, 4, 5, 6,
+    63, 80, 83,
+    84, 85, 86, 88, 89, 90, 91, 92,
+})
+
+ELEMENTARY_NON_JOHNSON_KEYS = frozenset({
+    # 2 Platônicos elementares (Cubo é prisma; Octaedro = 2×J1; Icosaedro = 2×J2 + antiprisma pentagonal)
+    "tetrahedron",
+    "dodecahedron",
+    # 9 Arquimedianos elementares (os 5 truncados de Platônicos + 2 truncados quase-regulares + 2 torcidos/snub)
+    "tetraedro truncado",
+    "cubo truncado",
+    "octaedro truncado",
+    "dodecaedro truncado",
+    "icosaedro truncado",
+    "cuboctaedro truncado",
+    "icosidodecaedro truncado",
+    "cubo torcido",
+    "cubo torcido 1",
+    "cubo torcido 2",
+    "dodecaedro torcido",
+    "dodecaedro torcido 1",
+    "dodecaedro torcido 2",
+    "snub cube",
+    "snub dodecahedron",
+    "truncated tetrahedron",
+    "truncated cube",
+    "truncated octahedron",
+    "truncated dodecahedron",
+    "truncated icosahedron",
+    "truncated cuboctahedron",
+    "truncated icosidodecahedron",
+})
+
+CATALOG_SEGMENTS: List[Dict[str, str]] = [
+    {
+        "key": "all",
+        "label": "Todos",
+        "definition": "Catálogo completo da pesquisa: Sólidos de Johnson, Platônicos, Arquimedianos, Prismas e Antiprismas.",
+    },
+    {
+        "key": "johnson",
+        "label": "Johnson (todos)",
+        "definition": "Os 92 poliedros estritamente convexos de faces regulares que não são platônicos, arquimedianos, prismas nem antiprismas (J1–J92).",
+    },
+    {
+        "key": "elementares",
+        "label": "Elementares",
+        "definition": "Poliedros convexos de faces regulares irredutíveis por planos de corte em dois poliedros menores de faces regulares (Zalgaller, 1969).",
+    },
+    {
+        "key": "prismas",
+        "label": "Prismas",
+        "definition": "Poliedros uniformes formados por duas bases poligonais regulares congruentes e paralelas unidas por faces quadradas.",
+    },
+    {
+        "key": "antiprismas",
+        "label": "Antiprismas",
+        "definition": "Poliedros uniformes com duas bases poligonais regulares paralelas e rotacionadas entre si, ligadas por uma faixa alternada de triângulos equiláteros.",
+    },
+    {
+        "key": "arquimedianos",
+        "label": "Arquimedianos",
+        "definition": "Poliedros convexos semirregulares vértice-transitivos compostos por dois ou mais tipos de polígonos regulares (excluindo prismas e antiprismas).",
+    },
+    {
+        "key": "platonicos",
+        "label": "Platônicos",
+        "definition": "Os cinco poliedros convexos regulares com faces congruentes a um mesmo polígono regular e mesmo grau em todos os vértices.",
+    },
+]
+
 SOLID_CATALOG_METADATA: Dict[str, Dict[str, str]] = {
     # Platônicos
-    "Tetrahedron": {"pt": "Tetraedro Regular", "en": "Regular Tetrahedron", "family": "Platônicos"},
-    "Cube": {"pt": "Hexaedro Regular (Cubo)", "en": "Cube", "family": "Platônicos"},
-    "Octahedron": {"pt": "Octaedro Regular", "en": "Regular Octahedron", "family": "Platônicos"},
-    "Dodecahedron": {"pt": "Dodecaedro Regular", "en": "Regular Dodecahedron", "family": "Platônicos"},
-    "Icosahedron": {"pt": "Icosaedro Regular", "en": "Regular Icosahedron", "family": "Platônicos"},
+    "Tetrahedron": {"pt": "Tetraedro Regular", "en": "Regular Tetrahedron", "family": "Platônicos", "segment": "platonicos"},
+    "Cube": {"pt": "Hexaedro Regular (Cubo)", "en": "Cube", "family": "Platônicos", "segment": "platonicos"},
+    "Octahedron": {"pt": "Octaedro Regular", "en": "Regular Octahedron", "family": "Platônicos", "segment": "platonicos"},
+    "Dodecahedron": {"pt": "Dodecaedro Regular", "en": "Regular Dodecahedron", "family": "Platônicos", "segment": "platonicos"},
+    "Icosahedron": {"pt": "Icosaedro Regular", "en": "Regular Icosahedron", "family": "Platônicos", "segment": "platonicos"},
     # Arquimedianos
-    "Tetraedro_truncado": {"pt": "Tetraedro Truncado", "en": "Truncated Tetrahedron", "family": "Arquimedianos"},
-    "Cubo_truncado": {"pt": "Cubo Truncado", "en": "Truncated Cube", "family": "Arquimedianos"},
-    "Octaedro_truncado": {"pt": "Octaedro Truncado", "en": "Truncated Octahedron", "family": "Arquimedianos"},
-    "Icosaedro truncado": {"pt": "Icosaedro Truncado", "en": "Truncated Icosahedron", "family": "Arquimedianos"},
-    "Dodecaedro truncado": {"pt": "Dodecaedro Truncado", "en": "Truncated Dodecahedron", "family": "Arquimedianos"},
-    "Cuboctaedro": {"pt": "Cuboctaedro", "en": "Cuboctahedron", "family": "Arquimedianos"},
-    # Antiprismas e Prismas
-    "Antiprisma_quadrado": {"pt": "Antiprisma Quadrado", "en": "Square Antiprism", "family": "Prismas e Antiprismas"},
-    "Antiprisma_pentagonal": {"pt": "Antiprisma Pentagonal", "en": "Pentagonal Antiprism", "family": "Prismas e Antiprismas"},
-    "Prisma_triangular": {"pt": "Prisma Triangular", "en": "Triangular Prism", "family": "Prismas e Antiprismas"},
-    "Prisma_pentagonal": {"pt": "Prisma Pentagonal", "en": "Pentagonal Prism", "family": "Prismas e Antiprismas"},
+    "Tetraedro_truncado": {"pt": "Tetraedro Truncado", "en": "Truncated Tetrahedron", "family": "Arquimedianos", "segment": "arquimedianos"},
+    "Cubo_truncado": {"pt": "Cubo Truncado", "en": "Truncated Cube", "family": "Arquimedianos", "segment": "arquimedianos"},
+    "Octaedro_truncado": {"pt": "Octaedro Truncado", "en": "Truncated Octahedron", "family": "Arquimedianos", "segment": "arquimedianos"},
+    "Icosaedro truncado": {"pt": "Icosaedro Truncado", "en": "Truncated Icosahedron", "family": "Arquimedianos", "segment": "arquimedianos"},
+    "Dodecaedro truncado": {"pt": "Dodecaedro Truncado", "en": "Truncated Dodecahedron", "family": "Arquimedianos", "segment": "arquimedianos"},
+    "Cuboctaedro": {"pt": "Cuboctaedro", "en": "Cuboctahedron", "family": "Arquimedianos", "segment": "arquimedianos"},
+    "Cuboctaedro truncado": {"pt": "Cuboctaedro Truncado", "en": "Truncated Cuboctahedron", "family": "Arquimedianos", "segment": "arquimedianos"},
+    "Cuboctaedro_truncado": {"pt": "Cuboctaedro Truncado", "en": "Truncated Cuboctahedron", "family": "Arquimedianos", "segment": "arquimedianos"},
+    "Icosidodecaedro": {"pt": "Icosidodecaedro", "en": "Icosidodecahedron", "family": "Arquimedianos", "segment": "arquimedianos"},
+    "Icosidodecaedro truncado": {"pt": "Icosidodecaedro Truncado", "en": "Truncated Icosidodecahedron", "family": "Arquimedianos", "segment": "arquimedianos"},
+    "Icosidodecaedro_truncado": {"pt": "Icosidodecaedro Truncado", "en": "Truncated Icosidodecahedron", "family": "Arquimedianos", "segment": "arquimedianos"},
+    "Rombicuboctaedro": {"pt": "Rombicuboctaedro", "en": "Rhombicuboctahedron", "family": "Arquimedianos", "segment": "arquimedianos"},
+    "Rombicosidodecaedro": {"pt": "Rombicosidodecaedro", "en": "Rhombicosidodecahedron", "family": "Arquimedianos", "segment": "arquimedianos"},
+    "Cubo torcido": {"pt": "Cubo Torcido (Snub Cube)", "en": "Snub Cube", "family": "Arquimedianos", "segment": "arquimedianos"},
+    "Cubo_torcido": {"pt": "Cubo Torcido (Snub Cube)", "en": "Snub Cube", "family": "Arquimedianos", "segment": "arquimedianos"},
+    "Dodecaedro torcido": {"pt": "Dodecaedro Torcido (Snub Dodecahedron)", "en": "Snub Dodecahedron", "family": "Arquimedianos", "segment": "arquimedianos"},
+    "Dodecaedro_torcido": {"pt": "Dodecaedro Torcido (Snub Dodecahedron)", "en": "Snub Dodecahedron", "family": "Arquimedianos", "segment": "arquimedianos"},
+    # Prismas
+    "Prisma_triangular": {"pt": "Prisma Triangular", "en": "Triangular Prism", "family": "Prismas", "segment": "prismas"},
+    "Prisma_pentagonal": {"pt": "Prisma Pentagonal", "en": "Pentagonal Prism", "family": "Prismas", "segment": "prismas"},
+    # Antiprismas
+    "Antiprisma_quadrado": {"pt": "Antiprisma Quadrado", "en": "Square Antiprism", "family": "Antiprismas", "segment": "antiprismas"},
+    "Antiprisma_pentagonal": {"pt": "Antiprisma Pentagonal", "en": "Pentagonal Antiprism", "family": "Antiprismas", "segment": "antiprismas"},
 }
 
 JOHNSON_NAMES: Dict[int, Tuple[str, str]] = {
@@ -215,25 +301,35 @@ JOHNSON_NAMES: Dict[int, Tuple[str, str]] = {
 
 
 def get_solid_metadata(name: str) -> Dict[str, Any]:
-    """Retorna nomenclatura científica (PT/EN), família e ordem canônica para qualquer sólido."""
-    if name in SOLID_CATALOG_METADATA:
-        meta = SOLID_CATALOG_METADATA[name]
+    """Retorna nomenclatura científica (PT/EN), família, segmento, flag elementar e ordem canônica."""
+    raw_name = name.strip()
+    norm_key = re.sub(r"[_\s]+", " ", raw_name).lower()
+
+    if raw_name in SOLID_CATALOG_METADATA:
+        meta = SOLID_CATALOG_METADATA[raw_name]
         order_map = {
             "Tetrahedron": 1, "Cube": 2, "Octahedron": 3, "Dodecahedron": 4, "Icosahedron": 5,
             "Tetraedro_truncado": 11, "Cubo_truncado": 12, "Octaedro_truncado": 13,
             "Icosaedro truncado": 14, "Dodecaedro truncado": 15, "Cuboctaedro": 16,
-            "Prisma_triangular": 21, "Prisma_pentagonal": 22,
-            "Antiprisma_quadrado": 23, "Antiprisma_pentagonal": 24,
+            "Cuboctaedro truncado": 17, "Cuboctaedro_truncado": 17,
+            "Icosidodecaedro": 18, "Icosidodecaedro truncado": 19, "Icosidodecaedro_truncado": 19,
+            "Rombicuboctaedro": 20, "Rombicosidodecaedro": 21,
+            "Cubo torcido": 22, "Cubo_torcido": 22,
+            "Dodecaedro torcido": 23, "Dodecaedro_torcido": 23,
+            "Prisma_triangular": 31, "Prisma_pentagonal": 32,
+            "Antiprisma_quadrado": 41, "Antiprisma_pentagonal": 42,
         }
         return {
-            "display_code": name.replace("_", " "),
+            "display_code": raw_name.replace("_", " "),
             "name_pt": meta["pt"],
             "name_en": meta["en"],
             "family": meta["family"],
-            "sort_key": order_map.get(name, 50),
+            "segment": meta["segment"],
+            "is_elementary": norm_key in ELEMENTARY_NON_JOHNSON_KEYS,
+            "sort_key": order_map.get(raw_name, 50),
         }
 
-    m = re.match(r"^[jJ](\d+)$", name.strip())
+    m = re.match(r"^[jJ](\d+)$", raw_name)
     if m:
         idx = int(m.group(1))
         pt, en = JOHNSON_NAMES.get(idx, (f"Sólido de Johnson J{idx}", f"Johnson Solid J{idx}"))
@@ -242,15 +338,114 @@ def get_solid_metadata(name: str) -> Dict[str, Any]:
             "name_pt": pt,
             "name_en": en,
             "family": "Sólidos de Johnson",
+            "segment": "johnson",
+            "is_elementary": idx in ELEMENTARY_JOHNSON_IDS,
             "sort_key": 100 + idx,
         }
 
+    if norm_key.startswith("antiprisma"):
+        return {
+            "display_code": raw_name.replace("_", " "),
+            "name_pt": raw_name.replace("_", " ").capitalize(),
+            "name_en": raw_name.replace("_", " "),
+            "family": "Antiprismas",
+            "segment": "antiprismas",
+            "is_elementary": False,
+            "sort_key": 45,
+        }
+    if norm_key.startswith("prisma"):
+        return {
+            "display_code": raw_name.replace("_", " "),
+            "name_pt": raw_name.replace("_", " ").capitalize(),
+            "name_en": raw_name.replace("_", " "),
+            "family": "Prismas",
+            "segment": "prismas",
+            "is_elementary": False,
+            "sort_key": 35,
+        }
+
     return {
-        "display_code": name.replace("_", " "),
-        "name_pt": name.replace("_", " "),
-        "name_en": name.replace("_", " "),
+        "display_code": raw_name.replace("_", " "),
+        "name_pt": raw_name.replace("_", " "),
+        "name_en": raw_name.replace("_", " "),
         "family": "Outros Poliedros",
+        "segment": "outros",
+        "is_elementary": norm_key in ELEMENTARY_NON_JOHNSON_KEYS,
         "sort_key": 500,
+    }
+
+
+def extract_execution_metadata(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """
+    Extrai e normaliza metadados técnicos da execução (condição inicial, método,
+    tamanho da amostra, tentativas necessárias, iterações e tempo) a partir do JSON.
+    Retorna None caso o registro seja de uma execução legada sem esses campos.
+    """
+    if not isinstance(data, dict):
+        return None
+    raw = data.get("execucao")
+    src = raw if isinstance(raw, dict) else {}
+
+    def pick(*keys):
+        for k in keys:
+            if k in src and src[k] is not None:
+                return src[k]
+            if k in data and data[k] is not None:
+                return data[k]
+        return None
+
+    metodo = pick("metodo_inicial", "condicao_inicial_metodo", "metodo")
+    vc_ini = pick("vc_inicial", "condicao_inicial", "initial_vertices")
+    amostra = pick("tamanho_amostra", "amostra", "sample_size")
+    tentativa = pick("tentativa", "tentativas", "tentativas_necessarias", "attempts")
+    iters = pick("iteracoes_otimizador", "iteracoes", "iterations", "it")
+    tempo = pick("tempo_segundos", "elapsed_time", "tempo")
+    lado_l = pick("lado_L", "lado_l", "hipercubo_L")
+    eps = pick("epsilon_perturbacao", "epsilon")
+    norm_g = pick("norm_grad", "norm_g")
+    autor = pick("autor", "pesquisador")
+    converged = pick("converged", "convergiu")
+    ocorrencias = pick("ocorrencias")
+
+    has_any = any(
+        v is not None
+        for v in (metodo, vc_ini, amostra, tentativa, iters, tempo, lado_l, eps, autor, ocorrencias)
+    )
+    if not has_any:
+        return None
+
+    vc_ini_clean = None
+    if isinstance(vc_ini, list) and vc_ini and isinstance(vc_ini[0], (list, tuple)) and len(vc_ini[0]) == 3:
+        try:
+            vc_ini_clean = [[float(c) for c in row] for row in vc_ini]
+        except Exception:
+            vc_ini_clean = None
+
+    return {
+        "metodo_inicial": str(metodo) if metodo is not None else None,
+        "lado_L": float(lado_l) if lado_l is not None else None,
+        "epsilon_perturbacao": float(eps) if eps is not None else None,
+        "tamanho_amostra": amostra,
+        "tentativa": int(tentativa) if isinstance(tentativa, (int, float)) else tentativa,
+        "iteracoes_otimizador": int(iters) if isinstance(iters, (int, float)) else None,
+        "tempo_segundos": float(tempo) if isinstance(tempo, (int, float)) else None,
+        "norm_grad": float(norm_g) if isinstance(norm_g, (int, float)) else None,
+        "converged": bool(converged) if converged is not None else None,
+        "autor": str(autor) if autor else None,
+        "has_vc_inicial": vc_ini_clean is not None,
+        "vc_inicial": vc_ini_clean,
+        "ocorrencias": ocorrencias if isinstance(ocorrencias, list) else None,
+    }
+
+
+def compact_execution_metadata(exec_meta: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Versão compacta de `execucao` para o catálogo leve (omite a matriz `vc_inicial`)."""
+    if not isinstance(exec_meta, dict):
+        return None
+    return {
+        k: v
+        for k, v in exec_meta.items()
+        if k != "vc_inicial" and v is not None
     }
 
 
@@ -383,7 +578,7 @@ class CatalogService:
     e hash de conteúdo para altíssima performance (sub-milissegundo em leituras repetidas).
     """
 
-    ANALYSIS_CACHE_SCHEMA = "v2_selfinter_geomhash"
+    ANALYSIS_CACHE_SCHEMA = "v3_catalog_execucao"
 
     def __init__(self, project_root: Path = PROJECT_ROOT):
         self.project_root = Path(project_root)
@@ -570,6 +765,8 @@ class CatalogService:
                     "name_pt": meta["name_pt"],
                     "name_en": meta["name_en"],
                     "family": meta["family"],
+                    "segment": meta["segment"],
+                    "is_elementary": meta["is_elementary"],
                     "sort_key": meta["sort_key"],
                     "has_topology": has_topology,
                     "topology": topo,
@@ -587,6 +784,8 @@ class CatalogService:
                     "name_pt": meta["name_pt"],
                     "name_en": meta["name_en"],
                     "family": meta["family"],
+                    "segment": meta["segment"],
+                    "is_elementary": meta["is_elementary"],
                     "sort_key": meta["sort_key"],
                     "has_topology": name in active_map,
                     "topology": compute_topology_summary(active_map[name][0]) if name in active_map else compute_topology_summary([]),
@@ -741,6 +940,7 @@ class CatalogService:
         distancias: List[float] = []
         angulos_salvos: List[float] = []
         autovalores: List[float] = []
+        execucao: Optional[Dict[str, Any]] = None
 
         if jf and jf.exists():
             try:
@@ -751,6 +951,7 @@ class CatalogService:
                 distancias = data.get("distancias", [])
                 angulos_salvos = data.get("angulos_diedrais", [])
                 autovalores = data.get("autovalores", [])
+                execucao = extract_execution_metadata(data)
             except Exception:
                 pass
 
@@ -832,6 +1033,7 @@ class CatalogService:
             "distancias": distancias,
             "angulos_salvos": angulos_salvos,
             "autovalores": autovalores,
+            "execucao": execucao,
         }
         self._solution_cache[cache_key] = (file_sig, result)
         disk_entries[cache_key] = {"sig": disk_sig_str, "result": result}
@@ -885,10 +1087,11 @@ class CatalogService:
                 solids_with_nonconvex += 1
                 total_nonconvex_solutions += len(nonconvex_sols)
 
-            # Aba RESULTADOS recebe exclusivamente soluções da pasta minimos_globais/convexos/
             primary_convex = convex_sols[0] if convex_sols else None
-            # Aba DESCOBERTAS recebe exclusivamente soluções da pasta minimos_globais/nao_convexos/
             primary_nonconvex = nonconvex_sols[0] if nonconvex_sols else None
+            # Catálogo unificado: prefere convexo como miniatura principal; se só houver
+            # global não convexo sem autointerseção, usa-o diretamente (nunca descarta!)
+            primary_any = primary_convex or primary_nonconvex
 
             def compact_sol(s: Dict[str, Any]) -> Dict[str, Any]:
                 out = {
@@ -917,6 +1120,7 @@ class CatalogService:
                         "reasons": s["convexity"]["reasons"],
                     },
                     "hessian": s["hessian"],
+                    "execucao": compact_execution_metadata(s.get("execucao")),
                     "has_scad": s["has_scad"],
                     "has_json": s["has_json"],
                     "has_txt": s["has_txt"],
@@ -927,6 +1131,7 @@ class CatalogService:
                     out["distancias"] = s["distancias"]
                     out["angulos_salvos"] = s["angulos_salvos"]
                     out["autovalores"] = s["autovalores"]
+                    out["execucao"] = s.get("execucao")
                     out["convexity"]["interior_dihedrals_deg"] = s["convexity"]["interior_dihedrals_deg"]
                 return out
 
@@ -936,6 +1141,8 @@ class CatalogService:
                 "name_pt": entry["name_pt"],
                 "name_en": entry["name_en"],
                 "family": entry["family"],
+                "segment": entry["segment"],
+                "is_elementary": entry["is_elementary"],
                 "sort_key": entry["sort_key"],
                 "has_topology": entry["has_topology"],
                 "topology": entry["topology"],
@@ -946,7 +1153,7 @@ class CatalogService:
                 "convex_count": len(convex_sols),
                 "nonconvex_count": len(nonconvex_sols),
                 "primary_convex": compact_sol(primary_convex) if primary_convex else None,
-                "primary_global": compact_sol(primary_convex) if primary_convex else None,
+                "primary_global": compact_sol(primary_any) if primary_any else None,
                 "primary_nonconvex": compact_sol(primary_nonconvex) if primary_nonconvex else None,
                 "convex_solutions": [compact_sol(s) for s in convex_sols],
                 "nonconvex_solutions": [compact_sol(s) for s in nonconvex_sols],
@@ -956,6 +1163,7 @@ class CatalogService:
         self.flush_disk_cache()
         return {
             "generated_at": datetime.now().isoformat(timespec="seconds"),
+            "segments": CATALOG_SEGMENTS,
             "summary": {
                 "total_solids": len(catalog_items),
                 "active_topology_solids": total_active,
@@ -971,7 +1179,7 @@ class CatalogService:
         }
 
     def get_solid_detail(self, solid_id: str) -> Optional[Dict[str, Any]]:
-        """Retorna dossiê científico completo de um único sólido (apenas mínimos globais)."""
+        """Retorna dossiê científico completo de um único sólido (todos os mínimos globais sem autointerseção)."""
         self.list_all_solids_from_faces_txt()
         target = self._solids_by_id.get(solid_id)
         if target is None:
@@ -1001,6 +1209,7 @@ class CatalogService:
                 "self_intersection": s["self_intersection"],
                 "convexity": s["convexity"],
                 "hessian": s["hessian"],
+                "execucao": s.get("execucao"),
                 "has_scad": s["has_scad"],
                 "has_json": s["has_json"],
                 "has_txt": s["has_txt"],
@@ -1018,6 +1227,8 @@ class CatalogService:
             "name_pt": target["name_pt"],
             "name_en": target["name_en"],
             "family": target["family"],
+            "segment": target["segment"],
+            "is_elementary": target["is_elementary"],
             "has_topology": target["has_topology"],
             "topology": target["topology"],
             "convex_solutions": [s for s in all_serialized if s["source_folder"] == "convexos"],

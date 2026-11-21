@@ -16,7 +16,7 @@ import shutil
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 
 def _ensure_conda_dll_paths():
@@ -45,10 +45,32 @@ if str(PROJECT_ROOT) not in sys.path:
 if str(WEB_DIR) not in sys.path:
     sys.path.insert(0, str(WEB_DIR))
 
-from geometry_analyzer import CatalogService
+from PIL import Image
+
+from geometry_analyzer import (
+    CATALOG_SEGMENTS,
+    CatalogService,
+    compact_execution_metadata,
+)
 from scad_renderer import CAMERA_PRESETS, PythonSCADRenderer
 from validador_cientifico import ValidadorCientifico
 from verificadores.isomorfismo import construir_matriz_distancias
+
+
+def _save_webp_from_image(src_path: Path, dst_webp: Path, max_size: int = 720, quality: int = 88) -> bool:
+    """Converte PNG/WebP para WebP otimizado (reduz ~5x a ~17x o peso do site sem perda perceptível)."""
+    try:
+        with Image.open(src_path) as im:
+            rgb = im.convert("RGB")
+            if max(rgb.size) > max_size:
+                rgb = rgb.resize((max_size, max_size), Image.Resampling.LANCZOS)
+            dst_webp.parent.mkdir(parents=True, exist_ok=True)
+            tmp = dst_webp.with_suffix(".tmp.webp")
+            rgb.save(tmp, format="WEBP", quality=quality, method=6)
+            os.replace(tmp, dst_webp)
+        return dst_webp.exists() and dst_webp.stat().st_size > 300
+    except Exception:
+        return False
 
 
 def safe_slug(text: str) -> str:
@@ -191,6 +213,7 @@ def build_static_atlas(
 
     stats = {
         "total_solids": len(solids_base),
+        "elementary_solids": sum(1 for e in solids_base if e.get("is_elementary")),
         "active_topology_solids": 0,
         "pending_topology_solids": 0,
         "solids_with_global": 0,
@@ -251,12 +274,14 @@ def build_static_atlas(
             cand_hash = analyzed.get("geom_hash") or _compute_geom_hash(analyzed["vertices"], analyzed["faces"])
 
             # Se for exatamente o mesmo registro já indexado no site (mesmo ID e mesmo geom_hash),
-            # apenas vincula os caminhos locais dos arquivos para download sem reprocessar como novo candidato
+            # vincula os caminhos locais e absorve metadados técnicos de execução (se agora disponíveis)
             if sol_id in existing_by_id and existing_by_id[sol_id].get("geom_hash") == cand_hash:
                 ex = existing_by_id[sol_id]
                 for k in ("scad_path", "json_path", "txt_path"):
                     if analyzed.get(k):
                         ex[k] = analyzed[k]
+                if analyzed.get("execucao") and not ex.get("execucao"):
+                    ex["execucao"] = analyzed["execucao"]
                 continue
 
             # ==================================================================
@@ -340,36 +365,59 @@ def build_static_atlas(
 
             render_map: Dict[str, str] = {}
             render_clean_map: Dict[str, str] = {}
+            thumb_rel: Optional[str] = None
+            thumb_clean_rel: Optional[str] = None
             has_face_diags = any(len(f) >= 4 for f in sol["faces"])
-            for preset in presets:
-                png_name = f"{slug}_{geom_hash}_{preset}.png"
-                target_png = renders_dir / png_name
-                used_render_names.add(png_name)
-                if not force_renders and target_png.exists() and target_png.stat().st_size > 1000:
-                    stats["renders_reused"] += 1
-                    render_map[preset] = f"./renders/{png_name}"
-                else:
-                    render_map[preset] = f"./renders/{png_name}"
-                    render_jobs.append((
-                        sid, sol_id, scad_path, preset,
-                        sol["vertices"], sol["faces"], target_png, render_map, True,
-                    ))
 
-                if has_face_diags:
-                    clean_name = f"{slug}_{geom_hash}_{preset}_clean.png"
-                    clean_png = renders_dir / clean_name
-                    used_render_names.add(clean_name)
-                    if not force_renders and clean_png.exists() and clean_png.stat().st_size > 1000:
+            def _schedule_or_reuse_webp(preset_key: str, include_diags: bool, target_map: Dict[str, str]) -> Optional[str]:
+                suffix = "" if include_diags else "_clean"
+                webp_name = f"{slug}_{geom_hash}_{preset_key}{suffix}.webp"
+                target_webp = renders_dir / webp_name
+                legacy_png = renders_dir / f"{slug}_{geom_hash}_{preset_key}{suffix}.png"
+                used_render_names.add(webp_name)
+                target_map[preset_key] = f"./renders/{webp_name}"
+
+                make_thumb = preset_key == "iso"
+                thumb_name = f"{slug}_{geom_hash}_{preset_key}{suffix}_thumb.webp" if make_thumb else None
+                target_thumb = (renders_dir / thumb_name) if thumb_name else None
+                if thumb_name:
+                    used_render_names.add(thumb_name)
+
+                if not force_renders and target_webp.exists() and target_webp.stat().st_size > 400:
+                    stats["renders_reused"] += 1
+                    if target_thumb and (not target_thumb.exists() or target_thumb.stat().st_size <= 300):
+                        _save_webp_from_image(target_webp, target_thumb, max_size=360, quality=84)
+                elif not force_renders and legacy_png.exists() and legacy_png.stat().st_size > 1000:
+                    if _save_webp_from_image(legacy_png, target_webp, max_size=720, quality=88):
                         stats["renders_reused"] += 1
-                        render_clean_map[preset] = f"./renders/{clean_name}"
+                        if target_thumb:
+                            _save_webp_from_image(legacy_png, target_thumb, max_size=360, quality=84)
                     else:
-                        render_clean_map[preset] = f"./renders/{clean_name}"
                         render_jobs.append((
-                            sid, sol_id, scad_path, preset,
-                            sol["vertices"], sol["faces"], clean_png, render_clean_map, False,
+                            sid, sol_id, scad_path, preset_key,
+                            sol["vertices"], sol["faces"], target_webp, target_thumb, target_map, include_diags,
                         ))
                 else:
+                    render_jobs.append((
+                        sid, sol_id, scad_path, preset_key,
+                        sol["vertices"], sol["faces"], target_webp, target_thumb, target_map, include_diags,
+                    ))
+
+                return f"./renders/{thumb_name}" if thumb_name else None
+
+            for preset in presets:
+                t_rel = _schedule_or_reuse_webp(preset, True, render_map)
+                if preset == "iso":
+                    thumb_rel = t_rel
+
+                if has_face_diags:
+                    tc_rel = _schedule_or_reuse_webp(preset, False, render_clean_map)
+                    if preset == "iso":
+                        thumb_clean_rel = tc_rel
+                else:
                     render_clean_map[preset] = render_map[preset]
+                    if preset == "iso":
+                        thumb_clean_rel = thumb_rel
 
             # Copia arquivos oficiais para downloads estáticos (ou preserva os já existentes em docs/files/)
             sol_files_dir = files_dir / slug / cat_folder
@@ -412,9 +460,12 @@ def build_static_atlas(
                 "verified_official": sol.get("verified_official", True),
                 "convexity": sol["convexity"],
                 "hessian": sol.get("hessian"),
+                "execucao": sol.get("execucao"),
                 "has_scad": "scad" in dl_map,
                 "has_json": "json" in dl_map,
                 "has_txt": "txt" in dl_map,
+                "thumb": thumb_rel or render_map.get("iso"),
+                "thumb_clean": thumb_clean_rel or render_clean_map.get("iso"),
                 "renders": render_map,
                 "renders_clean": render_clean_map,
                 "downloads": dl_map,
@@ -440,6 +491,8 @@ def build_static_atlas(
                 "name_pt": entry["name_pt"],
                 "name_en": entry["name_en"],
                 "family": entry["family"],
+                "segment": entry["segment"],
+                "is_elementary": entry["is_elementary"],
                 "has_topology": entry["has_topology"],
                 "topology": entry["topology"],
                 "convex_solutions": convex_sols,
@@ -455,35 +508,28 @@ def build_static_atlas(
             stats["solids_with_nonconvex_global"] += 1
             stats["total_nonconvex_solutions"] += len(nonconvex_sols)
 
-        # Aba RESULTADOS: exclusivamente pasta convexos/
         primary_convex = convex_sols[0] if convex_sols else None
-        # Aba DESCOBERTAS: exclusivamente pasta nao_convexos/
         primary_nonconvex = nonconvex_sols[0] if nonconvex_sols else None
+        # Catálogo unificado: prefere convexo na capa; se houver apenas global não convexo
+        # sem autointerseção, exibe-o normalmente sem nunca descartá-lo!
+        primary_any = primary_convex or primary_nonconvex
 
-        def compact(s: Dict[str, Any]) -> Dict[str, Any]:
-            return {
+        def compact_brief(s: Dict[str, Any]) -> Dict[str, Any]:
+            c = s.get("convexity") or {}
+            out = {
                 "solution_id": s["solution_id"],
                 "geom_hash": s.get("geom_hash", ""),
-                "source_folder": s["source_folder"],
                 "fval": s["fval"],
-                "timestamp": s["timestamp"],
                 "is_convex": s["is_convex"],
-                "classification": s["classification"],
-                "verified_official": s["verified_official"],
-                "renders": s["renders"],
-                "renders_clean": s.get("renders_clean", s["renders"]),
-                "convexity": {
-                    "volume": s["convexity"]["volume"],
-                    "hull_volume": s["convexity"]["hull_volume"],
-                    "volume_ratio": s["convexity"]["volume_ratio"],
-                    "interior_vertices": s["convexity"]["interior_vertices"],
-                    "non_supporting_faces": s["convexity"]["non_supporting_faces"],
-                    "reflex_edges": s["convexity"]["reflex_edges"],
-                    "min_dihedral_deg": s["convexity"]["min_dihedral_deg"],
-                    "max_dihedral_deg": s["convexity"]["max_dihedral_deg"],
-                    "reasons": s["convexity"]["reasons"],
-                },
+                "thumb": s.get("thumb") or (s.get("renders") or {}).get("iso"),
+                "thumb_clean": s.get("thumb_clean") or (s.get("renders_clean") or {}).get("iso"),
+                "max_dihedral_deg": c.get("max_dihedral_deg"),
+                "volume_ratio": c.get("volume_ratio"),
             }
+            ex = compact_execution_metadata(s.get("execucao"))
+            if ex:
+                out["execucao"] = ex
+            return out
 
         catalog_items.append({
             "id": sid,
@@ -493,6 +539,8 @@ def build_static_atlas(
             "name_pt": entry["name_pt"],
             "name_en": entry["name_en"],
             "family": entry["family"],
+            "segment": entry["segment"],
+            "is_elementary": entry["is_elementary"],
             "sort_key": entry["sort_key"],
             "has_topology": entry["has_topology"],
             "topology": entry["topology"],
@@ -502,20 +550,16 @@ def build_static_atlas(
             "global_count": len(sol_out_list),
             "convex_count": len(convex_sols),
             "nonconvex_count": len(nonconvex_sols),
-            "primary_convex": compact(primary_convex) if primary_convex else None,
-            "primary_global": compact(primary_convex) if primary_convex else None,
-            "primary_nonconvex": compact(primary_nonconvex) if primary_nonconvex else None,
-            "convex_solutions": [compact(s) for s in convex_sols],
-            "nonconvex_solutions": [compact(s) for s in nonconvex_sols],
-            "global_solutions": [compact(s) for s in sol_out_list],
+            "primary_global": compact_brief(primary_any) if primary_any else None,
+            "global_solutions": [compact_brief(s) for s in sol_out_list],
         })
 
-    # Executa todas as renderizações pendentes em paralelo (4 workers PythonSCAD/OpenSCAD)
+    # Executa todas as renderizações pendentes em paralelo (4 workers PythonSCAD/OpenSCAD -> WebP otimizado)
     if render_jobs:
         print(f"[Atlas] Renderizando {len(render_jobs)} fotografia(s) via {renderer.engine_name} em paralelo...")
 
         def _run_job(job):
-            sid, sol_id, scad_path, preset, verts, faces, target_png, render_map, include_diags = job
+            sid, sol_id, scad_path, preset, verts, faces, target_webp, target_thumb, render_map, include_diags = job
             rendered = renderer.render_solution_png(
                 solid_id=sid,
                 solution_id=sol_id,
@@ -527,8 +571,11 @@ def build_static_atlas(
                 include_diagonals=include_diags,
             )
             if rendered and rendered.exists():
-                shutil.copy2(rendered, target_png)
-                return True
+                ok_full = _save_webp_from_image(rendered, target_webp, max_size=720, quality=88)
+                if ok_full and target_thumb is not None:
+                    _save_webp_from_image(rendered, target_thumb, max_size=360, quality=84)
+                if ok_full:
+                    return True
             render_map.pop(preset, None)
             return False
 
@@ -537,41 +584,57 @@ def build_static_atlas(
                 if ok:
                     stats["renders_generated"] += 1
 
-    # Grava os dossiês individuais após concluir as renderizações
+    # Grava os dossiês individuais após concluir as renderizações (JSON compacto sem espaços extras)
     for slug, detail_payload in detail_payloads:
         (solids_data_dir / f"{slug}.json").write_text(
-            json.dumps(detail_payload, ensure_ascii=False),
+            json.dumps(detail_payload, ensure_ascii=False, separators=(",", ":")),
             encoding="utf-8",
         )
     for existing_json in solids_data_dir.glob("*.json"):
         if existing_json.name not in active_detail_slugs:
             existing_json.unlink(missing_ok=True)
 
-    # Remove PNGs órfãos antigos de renders_dir
-    for existing_png in renders_dir.glob("*.png"):
-        if existing_png.name not in used_render_names:
-            existing_png.unlink(missing_ok=True)
+    # Remove imagens órfãs/antigas (PNGs legados e WebPs não usados) de renders_dir
+    for existing_img in renders_dir.iterdir():
+        if existing_img.is_file() and existing_img.suffix.lower() in (".png", ".webp"):
+            if existing_img.name not in used_render_names:
+                existing_img.unlink(missing_ok=True)
 
-    # Grava catálogo estático principal
+    # Grava catálogo estático principal (compacto para carregamento instantâneo)
     catalog_payload = {
         "mode": "static",
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "render_engine": renderer.engine_name,
+        "segments": CATALOG_SEGMENTS,
         "summary": stats,
         "solids": catalog_items,
     }
     (data_dir / "catalog.json").write_text(
-        json.dumps(catalog_payload, ensure_ascii=False),
+        json.dumps(catalog_payload, ensure_ascii=False, separators=(",", ":")),
         encoding="utf-8",
     )
+
+    # Copia assets institucionais (logotipo IME-USP, emblema Arquimedes, favicon)
+    assets_src = STATIC_DIR / "assets"
+    assets_dst = output_dir / "assets"
+    if assets_src.is_dir():
+        assets_dst.mkdir(parents=True, exist_ok=True)
+        valid_asset_names = set()
+        for af in assets_src.iterdir():
+            if af.is_file():
+                shutil.copy2(af, assets_dst / af.name)
+                valid_asset_names.add(af.name)
+        for old_af in assets_dst.iterdir():
+            if old_af.is_file() and old_af.name not in valid_asset_names:
+                old_af.unlink(missing_ok=True)
 
     # Copia frontend (ajustando rotas de /static/ para relativas ./ para funcionar em qualquer subcaminho do GitHub Pages)
     html_src = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
     html_static = (
         html_src
         .replace("<body>", '<body data-atlas-mode="static">', 1)
-        .replace('href="/static/styles.css"', 'href="./styles.css"')
-        .replace('src="/static/app.js"', 'src="./app.js"')
+        .replace('href="/static/', 'href="./')
+        .replace('src="/static/', 'src="./')
     )
     (output_dir / "index.html").write_text(html_static, encoding="utf-8")
     shutil.copy2(STATIC_DIR / "styles.css", output_dir / "styles.css")
@@ -579,14 +642,14 @@ def build_static_atlas(
     (output_dir / ".nojekyll").write_text("", encoding="utf-8")
 
     print("-" * 68)
-    print(f"  Sólidos catalogados       : {stats['total_solids']} ({stats['active_topology_solids']} ativos)")
-    print(f"  Resultados (convexos)     : {stats['total_convex_solutions']} (em {stats['solids_with_convex_global']} sólidos)")
-    print(f"  Descobertas (não convexos): {stats['total_nonconvex_solutions']} (em {stats['solids_with_nonconvex_global']} sólidos)")
+    print(f"  Sólidos catalogados       : {stats['total_solids']} ({stats['elementary_solids']} elementares · {stats['active_topology_solids']} ativos)")
+    print(f"  Globais convexos          : {stats['total_convex_solutions']} (em {stats['solids_with_convex_global']} sólidos)")
+    print(f"  Globais não convexos      : {stats['total_nonconvex_solutions']} (em {stats['solids_with_nonconvex_global']} sólidos)")
     print(f"  Mínimos já no site        : {stats['existing_kept']} mantidos")
     print(f"  NOVOS mínimos adicionados : {stats['new_solutions_added']} adicionados")
     print(f"  Duplicatas isométricas    : {stats['duplicates_removed']} descartadas")
     print(f"  Soluções rejeitadas       : {stats['rejected_invalid']}")
-    print(f"  Fotos geradas / em cache  : {stats['renders_generated']} novas / {stats['renders_reused']} reutilizadas")
+    print(f"  Fotos WebP geradas/cache  : {stats['renders_generated']} novas / {stats['renders_reused']} reutilizadas")
     print("-" * 68)
     return stats
 

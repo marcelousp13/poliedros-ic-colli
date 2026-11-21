@@ -11,6 +11,7 @@ import gzip
 import hashlib
 import json
 import mimetypes
+mimetypes.add_type("image/webp", ".webp")
 import os
 import queue
 import sys
@@ -58,9 +59,11 @@ if str(WEB_DIR) not in sys.path:
     sys.path.insert(0, str(WEB_DIR))
 
 from geometry_analyzer import (
+    CATALOG_SEGMENTS,
     GLOBAL_DIR_NAMES,
     NO_INTERSECTION_SUBDIR_NAMES,
     CatalogService,
+    compact_execution_metadata,
     iter_global_category_dirs,
 )
 from github_sync import (
@@ -180,8 +183,7 @@ class VerifiedCatalogService:
 
         def _compact_from_detail(s: Dict[str, Any]) -> Dict[str, Any]:
             conv = s.get("convexity") or {}
-            si = s.get("self_intersection") or {}
-            return {
+            out = {
                 "solution_id": s["solution_id"],
                 "geom_hash": s.get("geom_hash", ""),
                 "source_folder": s["source_folder"],
@@ -189,28 +191,13 @@ class VerifiedCatalogService:
                 "timestamp": s["timestamp"],
                 "is_convex": s["is_convex"],
                 "classification": s["classification"],
-                "has_self_intersection": s.get("has_self_intersection", False),
-                "self_intersection": {
-                    "has_self_intersection": si.get("has_self_intersection", False),
-                    "intersection_count": si.get("intersection_count", 0),
-                    "intersection_types": si.get("intersection_types", []),
-                },
-                "convexity": {
-                    "volume": conv.get("volume", 0.0),
-                    "hull_volume": conv.get("hull_volume", 0.0),
-                    "volume_ratio": conv.get("volume_ratio", 1.0),
-                    "interior_vertices": conv.get("interior_vertices", 0),
-                    "non_supporting_faces": conv.get("non_supporting_faces", 0),
-                    "reflex_edges": conv.get("reflex_edges", 0),
-                    "min_dihedral_deg": conv.get("min_dihedral_deg", 0.0),
-                    "max_dihedral_deg": conv.get("max_dihedral_deg", 0.0),
-                    "reasons": conv.get("reasons", []),
-                },
-                "hessian": s.get("hessian"),
-                "has_scad": s.get("has_scad", True),
-                "has_json": s.get("has_json", True),
-                "has_txt": s.get("has_txt", True),
+                "max_dihedral_deg": conv.get("max_dihedral_deg"),
+                "volume_ratio": conv.get("volume_ratio"),
             }
+            ex = compact_execution_metadata(s.get("execucao"))
+            if ex:
+                out["execucao"] = ex
+            return out
 
         for item in raw["solids"]:
             sid = item["id"]
@@ -222,6 +209,7 @@ class VerifiedCatalogService:
                     conv_list = [_compact_from_detail(s) for s in detail["convex_solutions"]]
                     nconv_list = [_compact_from_detail(s) for s in detail["nonconvex_solutions"]]
                     all_list = conv_list + nconv_list
+                    primary_any = conv_list[0] if conv_list else (nconv_list[0] if nconv_list else None)
 
                     item["convex_solutions"] = conv_list
                     item["nonconvex_solutions"] = nconv_list
@@ -233,7 +221,7 @@ class VerifiedCatalogService:
                     item["has_nonconvex_global"] = bool(nconv_list)
                     item["has_global"] = bool(all_list)
                     item["primary_convex"] = conv_list[0] if conv_list else None
-                    item["primary_global"] = conv_list[0] if conv_list else None
+                    item["primary_global"] = primary_any
                     item["primary_nonconvex"] = nconv_list[0] if nconv_list else None
 
                 for s in item["global_solutions"]:
@@ -251,6 +239,8 @@ class VerifiedCatalogService:
             if item["has_nonconvex_global"]:
                 solids_with_nonconvex += 1
 
+        raw["segments"] = CATALOG_SEGMENTS
+        raw["summary"]["elementary_solids"] = sum(1 for s in raw["solids"] if s.get("is_elementary"))
         raw["summary"]["solids_with_global"] = solids_with_global
         raw["summary"]["solids_with_convex_global"] = solids_with_convex
         raw["summary"]["solids_with_nonconvex_global"] = solids_with_nonconvex
@@ -283,6 +273,8 @@ class VerifiedCatalogService:
             sol_id = cand["solution_id"]
             gh = cand.get("geom_hash", "")
             if sol_id in existing_ids and existing_ids[sol_id].get("geom_hash") == gh:
+                if cand.get("execucao") and not existing_ids[sol_id].get("execucao"):
+                    existing_ids[sol_id]["execucao"] = cand["execucao"]
                 continue
 
             if not detail.get("has_topology"):
@@ -762,22 +754,24 @@ class AtlasRequestHandler(BaseHTTPRequestHandler):
             if path.startswith("/api/render/"):
                 rest = path[len("/api/render/"):]
                 parts = rest.split("/", 1)
-                if len(parts) != 2 or not parts[1].endswith(".png"):
+                if len(parts) != 2 or not (parts[1].endswith(".png") or parts[1].endswith(".webp")):
                     self._send_json({"error": "Rota inválida."}, HTTPStatus.BAD_REQUEST)
                     return
                 solid_id = urllib.parse.unquote(parts[0])
-                sol_id = urllib.parse.unquote(parts[1][:-4])
+                sol_part = parts[1][:-5] if parts[1].endswith(".webp") else parts[1][:-4]
+                sol_id = urllib.parse.unquote(sol_part)
                 preset = (qs.get("preset", ["iso"])[0] or "iso").lower()
                 include_diags = qs.get("diagonals", ["1"])[0] != "0"
+                thumb = qs.get("thumb", ["0"])[0] == "1"
                 force = qs.get("force", ["0"])[0] == "1"
                 version_tag = (qs.get("v", [""])[0] or "").strip()
                 geom_hash = self.srv.catalog.get_geom_hash(solid_id, sol_id) or (version_tag if len(version_tag) == 14 else None)
-                dtag = "d1" if include_diags else "d0"
+                dtag = f"{'d1' if include_diags else 'd0'}_{'t1' if thumb else 't0'}_auto"
 
-                # Caminho ultra-rápido: RAM ou docs/renders/ sem precisar listar pastas de solidos/
-                png_res = None
+                # Caminho ultra-rápido: RAM ou docs/renders/ (WebP/PNG) sem precisar listar pastas de solidos/
+                img_res = None
                 if not force:
-                    png_res = self.srv.renderer.get_png_bytes(
+                    img_res = self.srv.renderer.get_image_bytes(
                         solid_id=solid_id,
                         solution_id=sol_id,
                         scad_path=None,
@@ -785,12 +779,14 @@ class AtlasRequestHandler(BaseHTTPRequestHandler):
                         geom_hash=geom_hash,
                         force=False,
                         include_diagonals=include_diags,
+                        thumb=thumb,
+                        as_png=False,
                     ) if (
                         self.srv.renderer._get_mem_png(f"{solid_id}|{sol_id}|{preset}|{geom_hash or ''}|{dtag}") is not None
-                        or self.srv.renderer._find_docs_render(solid_id, preset, geom_hash, include_diagonals=include_diags) is not None
+                        or self.srv.renderer._find_docs_render(solid_id, preset, geom_hash, include_diagonals=include_diags, thumb=thumb) is not None
                     ) else None
 
-                if png_res is None:
+                if img_res is None:
                     files = self.srv.catalog.base.find_solution_files(solid_id, sol_id)
                     if files is None:
                         self._send_json({"error": "Solução global não encontrada."}, HTTPStatus.NOT_FOUND)
@@ -805,7 +801,7 @@ class AtlasRequestHandler(BaseHTTPRequestHandler):
                             if sol:
                                 vertices, faces = sol["vertices"], sol["faces"]
 
-                    png_res = self.srv.renderer.get_png_bytes(
+                    img_res = self.srv.renderer.get_image_bytes(
                         solid_id=solid_id,
                         solution_id=sol_id,
                         scad_path=scad_path,
@@ -815,15 +811,17 @@ class AtlasRequestHandler(BaseHTTPRequestHandler):
                         geom_hash=geom_hash,
                         force=force,
                         include_diagonals=include_diags,
+                        thumb=thumb,
+                        as_png=False,
                     )
 
-                if png_res is None:
+                if img_res is None:
                     self._send_json({"error": "Render indisponível."}, HTTPStatus.INTERNAL_SERVER_ERROR)
                     return
 
-                png_bytes, etag = png_res
+                img_bytes, img_ctype, etag = img_res
                 cc = "public, max-age=31536000, immutable" if (version_tag and not force) else "public, max-age=3600"
-                self._send_bytes(png_bytes, "image/png", cache_control=cc, etag=etag)
+                self._send_bytes(img_bytes, img_ctype, cache_control=cc, etag=etag)
                 return
 
             if path.startswith("/api/download/"):

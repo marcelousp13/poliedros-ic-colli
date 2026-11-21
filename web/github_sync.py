@@ -73,6 +73,7 @@ IGNORED_TOP_DIRS = {
     ".git",
     "__pycache__",
     "gerador_solidos_extracted",
+    "backup_site_anterior",
 }
 IGNORED_EXTENSIONS = {".pyc", ".pyo", ".rar", ".zip", ".blend", ".blend1", ".log"}
 IGNORED_REL_PATHS = {
@@ -875,10 +876,10 @@ def sync_global_solutions_to_github(
                     if rel_s not in already_queued:
                         files_to_send.append((rel_s, s_json.read_bytes(), f"{s_json.stat().st_size}:{int(s_json.stat().st_mtime)}"))
                         already_queued.add(rel_s)
-                for png in (docs_dir / "renders").glob(f"{slug}_*.png"):
-                    rel_p = png.relative_to(PROJECT_ROOT).as_posix()
+                for img_f in list((docs_dir / "renders").glob(f"{slug}_*.webp")) + list((docs_dir / "renders").glob(f"{slug}_*.png")):
+                    rel_p = img_f.relative_to(PROJECT_ROOT).as_posix()
                     if rel_p not in already_queued:
-                        files_to_send.append((rel_p, png.read_bytes(), f"{png.stat().st_size}:{int(png.stat().st_mtime)}"))
+                        files_to_send.append((rel_p, img_f.read_bytes(), f"{img_f.stat().st_size}:{int(img_f.stat().st_mtime)}"))
                         already_queued.add(rel_p)
                 s_files_dir = docs_dir / "files" / slug
                 if s_files_dir.is_dir():
@@ -1037,6 +1038,7 @@ def pull_new_minima_from_github(rebuild_docs: bool = True) -> Tuple[bool, str, i
                 info_convexidade=avaliacao["convexity"],
                 info_autointersecao=avaliacao["self_intersection"],
                 timestamp=ts_val,
+                info_execucao=rsol.get("execucao"),
             )
             s_path = exportador.exportar_se_minimo_global(
                 nome_solido=sid,

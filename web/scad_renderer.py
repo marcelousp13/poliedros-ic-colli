@@ -425,14 +425,21 @@ class PythonSCADRenderer:
         preset: str,
         geom_hash: Optional[str],
         include_diagonals: bool = True,
+        thumb: bool = False,
     ) -> Optional[Path]:
-        """Reaproveita instantaneamente renders já existentes em docs/renders/ sem invocar PythonSCAD."""
+        """Reaproveita instantaneamente renders (WebP ou PNG) já existentes em docs/renders/ sem invocar PythonSCAD."""
         if not geom_hash or not self.docs_renders_dir.is_dir():
             return None
         suffix = "" if include_diagonals else "_clean"
-        cand = self.docs_renders_dir / f"{_safe_slug(solid_id)}_{geom_hash}_{preset}{suffix}.png"
-        if cand.is_file() and cand.stat().st_size > 1000:
-            return cand
+        slug = _safe_slug(solid_id)
+        candidates = []
+        if thumb:
+            candidates.append(self.docs_renders_dir / f"{slug}_{geom_hash}_{preset}{suffix}_thumb.webp")
+        candidates.append(self.docs_renders_dir / f"{slug}_{geom_hash}_{preset}{suffix}.webp")
+        candidates.append(self.docs_renders_dir / f"{slug}_{geom_hash}_{preset}{suffix}.png")
+        for cand in candidates:
+            if cand.is_file() and cand.stat().st_size > 400:
+                return cand
         return None
 
     def enqueue_prewarm(
@@ -473,7 +480,7 @@ class PythonSCADRenderer:
             except Exception:
                 pass
 
-    def get_png_bytes(
+    def get_image_bytes(
         self,
         solid_id: str,
         solution_id: str,
@@ -484,22 +491,40 @@ class PythonSCADRenderer:
         geom_hash: Optional[str] = None,
         force: bool = False,
         include_diagonals: bool = True,
-    ) -> Optional[Tuple[bytes, str]]:
+        thumb: bool = False,
+        as_png: bool = False,
+    ) -> Optional[Tuple[bytes, str, str]]:
         """
-        Retorna (png_bytes, etag) priorizando RAM -> docs/renders/ -> web/cache/renders/ -> render sob demanda.
+        Retorna (img_bytes, content_type, etag) priorizando RAM -> docs/renders/ (WebP/PNG)
+        -> web/cache/renders/ -> render sob demanda. Se `as_png=True`, garante saída PNG.
         """
-        dtag = "d1" if include_diagonals else "d0"
+        import io
+        dtag = f"{'d1' if include_diagonals else 'd0'}_{'t1' if thumb else 't0'}_{'png' if as_png else 'auto'}"
         mem_key = f"{solid_id}|{solution_id}|{preset}|{geom_hash or ''}|{dtag}"
         if not force:
             hit = self._get_mem_png(mem_key)
             if hit is not None:
-                return hit
+                raw_b, etag = hit
+                ctype = "image/webp" if raw_b[:4] == b"RIFF" and raw_b[8:12] == b"WEBP" else "image/png"
+                return raw_b, ctype, etag
 
-            docs_png = self._find_docs_render(solid_id, preset, geom_hash, include_diagonals=include_diagonals)
-            if docs_png is not None:
-                raw = docs_png.read_bytes()
+            docs_img = self._find_docs_render(
+                solid_id, preset, geom_hash, include_diagonals=include_diagonals, thumb=thumb
+            )
+            if docs_img is not None:
+                raw = docs_img.read_bytes()
+                is_webp = docs_img.suffix.lower() == ".webp"
+                if as_png and is_webp:
+                    buf = io.BytesIO()
+                    with Image.open(io.BytesIO(raw)) as im:
+                        im.save(buf, format="PNG", compress_level=6)
+                    raw = buf.getvalue()
+                    ctype = "image/png"
+                else:
+                    ctype = "image/webp" if is_webp else "image/png"
                 etag = f'"{hashlib.sha1(raw).hexdigest()[:16]}"'
-                return self._put_mem_png(mem_key, raw, etag)
+                self._put_mem_png(mem_key, raw, etag)
+                return raw, ctype, etag
 
         png_path = self.render_solution_png(
             solid_id=solid_id,
@@ -515,8 +540,54 @@ class PythonSCADRenderer:
         if not png_path or not png_path.exists():
             return None
         raw = png_path.read_bytes()
+        is_webp = png_path.suffix.lower() == ".webp"
+        if as_png and is_webp:
+            buf = io.BytesIO()
+            with Image.open(io.BytesIO(raw)) as im:
+                im.save(buf, format="PNG", compress_level=6)
+            raw = buf.getvalue()
+            ctype = "image/png"
+        elif thumb and not is_webp:
+            buf = io.BytesIO()
+            with Image.open(io.BytesIO(raw)) as im:
+                im.resize((360, 360), Image.Resampling.LANCZOS).save(buf, format="WEBP", quality=84, method=6)
+            raw = buf.getvalue()
+            ctype = "image/webp"
+        else:
+            ctype = "image/webp" if is_webp else "image/png"
         etag = f'"{hashlib.sha1(raw).hexdigest()[:16]}"'
-        return self._put_mem_png(mem_key, raw, etag)
+        self._put_mem_png(mem_key, raw, etag)
+        return raw, ctype, etag
+
+    def get_png_bytes(
+        self,
+        solid_id: str,
+        solution_id: str,
+        scad_path: Optional[Path],
+        preset: str = "iso",
+        vertices=None,
+        faces=None,
+        geom_hash: Optional[str] = None,
+        force: bool = False,
+        include_diagonals: bool = True,
+    ) -> Optional[Tuple[bytes, str]]:
+        """Compatibilidade: retorna (png_bytes, etag) sempre em formato PNG."""
+        res = self.get_image_bytes(
+            solid_id=solid_id,
+            solution_id=solution_id,
+            scad_path=scad_path,
+            preset=preset,
+            vertices=vertices,
+            faces=faces,
+            geom_hash=geom_hash,
+            force=force,
+            include_diagonals=include_diagonals,
+            thumb=False,
+            as_png=True,
+        )
+        if res is None:
+            return None
+        return res[0], res[2]
 
     @property
     def available(self) -> bool:
