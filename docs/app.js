@@ -38,6 +38,7 @@
     modalMode: "photo",
     modalPreset: "iso",
     modalDataTab: "vertices",
+    modalShowDiagonals3D: true,
     viewer3D: null,
   };
 
@@ -703,10 +704,26 @@
                 .join("")}
             </div>
           </div>`
-        : `<div class="camera-bar">
+        : (() => {
+            const diagCount = countFaceDiagonals(sol.faces);
+            const hasDiags = diagCount > 0;
+            const diagActive = hasDiags && state.modalShowDiagonals3D;
+            const diagStyle = diagActive
+              ? "border-color:var(--ink);background:var(--ink);color:#fff;"
+              : hasDiags
+                ? ""
+                : "opacity:0.45;cursor:not-allowed;";
+            const diagLabel = hasDiags
+              ? `Diagonais (${diagCount}): ${diagActive ? "On" : "Off"}`
+              : "Diagonais (0)";
+            return `<div class="camera-bar">
             <span class="mono muted-xs">Arraste · Zoom</span>
-            <button type="button" class="btn-tiny" id="btn-reset-3d">Reset</button>
+            <div style="display:flex;gap:4px;">
+              <button type="button" class="btn-tiny" id="btn-toggle-diagonals-3d" style="${diagStyle}" ${hasDiags ? "" : "disabled"} title="Alternar exibição de todas as diagonais reais de cada face">${diagLabel}</button>
+              <button type="button" class="btn-tiny" id="btn-reset-3d">Reset</button>
+            </div>
           </div>`;
+          })();
 
     const topo = detail.topology;
     const h = sol.hessian;
@@ -820,7 +837,20 @@
     }
 
     if (state.modalMode === "3d") {
-      initViewer3D($("#modal-3d-canvas"), sol.vertices, sol.faces, !sol.is_convex);
+      initViewer3D($("#modal-3d-canvas"), sol.vertices, sol.faces, !sol.is_convex, state.modalShowDiagonals3D);
+      const diagBtn = $("#btn-toggle-diagonals-3d");
+      if (diagBtn && !diagBtn.disabled) {
+        const diagCount = countFaceDiagonals(sol.faces);
+        diagBtn.addEventListener("click", () => {
+          state.modalShowDiagonals3D = !state.modalShowDiagonals3D;
+          const active = state.modalShowDiagonals3D;
+          diagBtn.textContent = `Diagonais (${diagCount}): ${active ? "On" : "Off"}`;
+          diagBtn.style.borderColor = active ? "var(--ink)" : "";
+          diagBtn.style.background = active ? "var(--ink)" : "";
+          diagBtn.style.color = active ? "#fff" : "";
+          state.viewer3D?.setShowDiagonals(active);
+        });
+      }
       $("#btn-reset-3d")?.addEventListener("click", () => state.viewer3D?.reset());
     }
   }
@@ -886,6 +916,15 @@
   // ==========================================================================
   // VISUALIZADOR 3D EM CANVAS
   // ==========================================================================
+  function countFaceDiagonals(faces) {
+    let total = 0;
+    for (const f of faces || []) {
+      const m = f.length;
+      if (m >= 4) total += (m * (m - 3)) / 2;
+    }
+    return total;
+  }
+
   function destroyViewer3D() {
     if (state.viewer3D) {
       state.viewer3D.destroy();
@@ -893,7 +932,7 @@
     }
   }
 
-  function initViewer3D(canvas, rawVertices, faces, isDiscovery) {
+  function initViewer3D(canvas, rawVertices, faces, isDiscovery, initialShowDiagonals = true) {
     if (!canvas || !rawVertices?.length || !faces?.length) return;
 
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
@@ -916,6 +955,7 @@
     const normVerts = verts.map((v) => [v[0] / maxR, v[1] / maxR, v[2] / maxR]);
 
     let rotX = -0.52, rotY = 0.62, zoom = 1.0, dragging = false, lastX = 0, lastY = 0, autoSpin = true, rafId = null;
+    let showDiagonals = Boolean(initialShowDiagonals);
     const baseRgb = isDiscovery ? [175, 42, 76] : [66, 113, 174];
 
     function transform(p) {
@@ -969,8 +1009,27 @@
         ctx.closePath();
         ctx.fillStyle = `rgb(${r},${g},${b})`;
         ctx.fill();
-        ctx.strokeStyle = "rgba(15, 23, 42, 0.34)";
-        ctx.lineWidth = 1.0;
+
+        if (showDiagonals && df.pts2.length >= 4) {
+          const m = df.pts2.length;
+          ctx.beginPath();
+          for (let i = 0; i < m; i++) {
+            for (let j = i + 2; j < m; j++) {
+              if (i === 0 && j === m - 1) continue;
+              ctx.moveTo(df.pts2[i][0], df.pts2[i][1]);
+              ctx.lineTo(df.pts2[j][0], df.pts2[j][1]);
+            }
+          }
+          ctx.strokeStyle = m >= 8 ? "rgba(255, 255, 255, 0.44)" : "rgba(255, 255, 255, 0.68)";
+          ctx.lineWidth = m >= 8 ? 0.75 : 0.95;
+          ctx.stroke();
+        }
+
+        ctx.beginPath();
+        df.pts2.forEach((p, idx) => (idx === 0 ? ctx.moveTo(p[0], p[1]) : ctx.lineTo(p[0], p[1])));
+        ctx.closePath();
+        ctx.strokeStyle = "rgba(15, 23, 42, 0.52)";
+        ctx.lineWidth = 1.15;
         ctx.lineJoin = "round";
         ctx.stroke();
       }
@@ -1013,6 +1072,7 @@
 
     state.viewer3D = {
       reset() { rotX = -0.52; rotY = 0.62; zoom = 1.0; autoSpin = true; scheduleDraw(); },
+      setShowDiagonals(val) { showDiagonals = Boolean(val); scheduleDraw(); },
       destroy() {
         autoSpin = false;
         if (rafId !== null) { cancelAnimationFrame(rafId); rafId = null; }

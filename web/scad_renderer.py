@@ -15,7 +15,7 @@ import subprocess
 import sys
 import threading
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 from PIL import Image
@@ -97,11 +97,177 @@ def find_openscad_binary() -> Optional[Path]:
     return None
 
 
+FACE_COLOR_RGB = (0.2588, 0.4431, 0.6824)       # Azul Tomorrow (#4271ae)
+EDGE_COLOR_RGB = (0.87, 0.92, 0.98)             # Arestas reais de contorno
+DIAG_COLOR_STD_RGB = (0.82, 0.89, 0.98)         # Diagonais reais (m = 4, 5, 6)
+DIAG_COLOR_DENSE_RGB = (0.74, 0.84, 0.96)       # Diagonais reais (m >= 8, mais sutis)
+RENDER_CACHE_VERSION = "v4_real_diags"
+
+
+def _segment_transform_matrix(p1, p2) -> Tuple[float, Optional[List[List[float]]]]:
+    """Calcula comprimento L e matriz 4x4 que alinha o eixo +Z de um cilindro ao segmento p1 -> p2."""
+    a = np.asarray(p1, dtype=float)
+    b = np.asarray(p2, dtype=float)
+    v = b - a
+    length = float(np.linalg.norm(v))
+    if length < 1e-12:
+        return 0.0, None
+    z = v / length
+    ref = np.array([1.0, 0.0, 0.0]) if abs(z[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
+    x = np.cross(ref, z)
+    x_norm = float(np.linalg.norm(x))
+    if x_norm < 1e-12:
+        return 0.0, None
+    x /= x_norm
+    y = np.cross(z, x)
+    mat = [
+        [round(float(x[0]), 8), round(float(y[0]), 8), round(float(z[0]), 8), round(float(a[0]), 8)],
+        [round(float(x[1]), 8), round(float(y[1]), 8), round(float(z[1]), 8), round(float(a[1]), 8)],
+        [round(float(x[2]), 8), round(float(y[2]), 8), round(float(z[2]), 8), round(float(a[2]), 8)],
+        [0.0, 0.0, 0.0, 1.0],
+    ]
+    return length, mat
+
+
+def _extract_real_edges_and_diagonals(faces) -> Tuple[List[Tuple[int, int]], List[Tuple[int, int, int]]]:
+    """
+    Extrai separadamente todas as arestas reais de contorno (k = 1) e todas as
+    diagonais reais internas de cada face poligonal (k >= 2, m >= 4).
+    """
+    edges = set()
+    for f in faces:
+        m = len(f)
+        if m < 3:
+            continue
+        for i in range(m):
+            a, b = int(f[i]), int(f[(i + 1) % m])
+            if a != b:
+                edges.add((min(a, b), max(a, b)))
+
+    diags: Dict[Tuple[int, int], int] = {}
+    for f in faces:
+        m = len(f)
+        if m < 4:
+            continue
+        for i in range(m):
+            for j in range(i + 2, m):
+                if i == 0 and j == m - 1:
+                    continue
+                a, b = int(f[i]), int(f[j])
+                if a == b:
+                    continue
+                key = (min(a, b), max(a, b))
+                if key not in edges:
+                    diags[key] = max(diags.get(key, 0), m)
+
+    return sorted(edges), [(a, b, m) for (a, b), m in sorted(diags.items())]
+
+
+def _compute_wireframe_radii(vertices) -> Tuple[float, float, float]:
+    """Escala o raio dos cilindros proporcionalmente ao raio envolvente do sólido."""
+    V = np.asarray(vertices, dtype=float)
+    centroid = V.mean(axis=0)
+    max_r = float(np.max(np.linalg.norm(V - centroid, axis=1))) or 1.0
+    r_edge = round(max(0.0060, 0.0085 * max_r), 6)
+    r_diag_std = round(max(0.0036, 0.0049 * max_r), 6)
+    r_diag_dense = round(max(0.0026, 0.0034 * max_r), 6)
+    return r_edge, r_diag_std, r_diag_dense
+
+
+def _generate_pythonscad_render_scene(vertices, faces, scale_factor: float = 20.0) -> str:
+    """
+    Gera cena temporária PythonSCAD com o poliedro sólido + todas as arestas reais
+    de contorno + todas as diagonais reais de cada face (via cilindros com multmatrix,
+    eliminando as linhas falsas de triangulação do --view=edges).
+    """
+    edges, diags = _extract_real_edges_and_diagonals(faces)
+    r_edge, r_diag_std, r_diag_dense = _compute_wireframe_radii(vertices)
+
+    pts_clean = [[round(float(v[0]), 12), round(float(v[1]), 12), round(float(v[2]), 12)] for v in vertices]
+    faces_clean = [[int(idx) for idx in f] for f in faces]
+
+    lines = [
+        "from openscad import *",
+        f"pts = {pts_clean}",
+        f"faces = {faces_clean}",
+        f"parts = [color(polyhedron(pts, faces), {list(FACE_COLOR_RGB)})]",
+    ]
+    edge_col = list(EDGE_COLOR_RGB)
+    for p in pts_clean:
+        lines.append(
+            f"parts.append(color(translate(sphere(r={r_edge:.6f}, fn=10), [{p[0]:.8f}, {p[1]:.8f}, {p[2]:.8f}]), {edge_col}))"
+        )
+    for a, b in edges:
+        length, mat = _segment_transform_matrix(pts_clean[a], pts_clean[b])
+        if mat is None:
+            continue
+        lines.append(
+            f"parts.append(color(multmatrix(cylinder(h={length:.8f}, r={r_edge:.6f}, fn=10), {mat}), {edge_col}))"
+        )
+    diag_std_col = list(DIAG_COLOR_STD_RGB)
+    diag_dense_col = list(DIAG_COLOR_DENSE_RGB)
+    for a, b, m in diags:
+        length, mat = _segment_transform_matrix(pts_clean[a], pts_clean[b])
+        if mat is None:
+            continue
+        r_d = r_diag_dense if m >= 8 else r_diag_std
+        col = diag_dense_col if m >= 8 else diag_std_col
+        lines.append(
+            f"parts.append(color(multmatrix(cylinder(h={length:.8f}, r={r_d:.6f}, fn=10), {mat}), {col}))"
+        )
+    lines.append(f"obj = scale(union(*parts), {scale_factor})")
+    lines.append("show(obj)")
+    return "\n".join(lines) + "\n"
+
+
 def _generate_standard_scad(vertices, faces, scale_factor: float = 20.0) -> str:
-    """Converte vértices e faces para sintaxe OpenSCAD padrão (.scad) para renderização headless no Linux/CI."""
-    pts_lines = ",\n".join(f"  [{float(v[0]):.16f}, {float(v[1]):.16f}, {float(v[2]):.16f}]" for v in vertices)
+    """
+    Converte vértices e faces para sintaxe OpenSCAD padrão (.scad) com arestas reais
+    e todas as diagonais reais de cada face (para renderização headless no Linux/CI).
+    """
+    edges, diags = _extract_real_edges_and_diagonals(faces)
+    r_edge, r_diag_std, r_diag_dense = _compute_wireframe_radii(vertices)
+
+    pts_lines = ",\n".join(f"  [{float(v[0]):.12f}, {float(v[1]):.12f}, {float(v[2]):.12f}]" for v in vertices)
     faces_str = str([[int(i) for i in f] for f in faces])
-    return f"pts = [\n{pts_lines}\n];\nfaces = {faces_str};\nscale({scale_factor}) polyhedron(points=pts, faces=faces);\n"
+
+    lines = [
+        f"pts = [\n{pts_lines}\n];",
+        f"faces = {faces_str};",
+        f"scale({scale_factor}) {{",
+        f"  color({list(FACE_COLOR_RGB)}) polyhedron(points=pts, faces=faces);",
+        f"  color({list(EDGE_COLOR_RGB)}) {{",
+    ]
+    for v in vertices:
+        lines.append(f"    translate([{float(v[0]):.8f}, {float(v[1]):.8f}, {float(v[2]):.8f}]) sphere(r={r_edge:.6f}, $fn=10);")
+    for a, b in edges:
+        length, mat = _segment_transform_matrix(vertices[a], vertices[b])
+        if mat is None:
+            continue
+        lines.append(f"    multmatrix({mat}) cylinder(h={length:.8f}, r={r_edge:.6f}, $fn=10);")
+    lines.append("  }")
+
+    diags_std = [(a, b) for a, b, m in diags if m < 8]
+    diags_dense = [(a, b) for a, b, m in diags if m >= 8]
+    if diags_std:
+        lines.append(f"  color({list(DIAG_COLOR_STD_RGB)}) {{")
+        for a, b in diags_std:
+            length, mat = _segment_transform_matrix(vertices[a], vertices[b])
+            if mat is None:
+                continue
+            lines.append(f"    multmatrix({mat}) cylinder(h={length:.8f}, r={r_diag_std:.6f}, $fn=10);")
+        lines.append("  }")
+    if diags_dense:
+        lines.append(f"  color({list(DIAG_COLOR_DENSE_RGB)}) {{")
+        for a, b in diags_dense:
+            length, mat = _segment_transform_matrix(vertices[a], vertices[b])
+            if mat is None:
+                continue
+            lines.append(f"    multmatrix({mat}) cylinder(h={length:.8f}, r={r_diag_dense:.6f}, $fn=10);")
+        lines.append("  }")
+
+    lines.append("}")
+    return "\n".join(lines) + "\n"
 
 
 def _studio_postprocess_white(raw_png: Path, out_png: Path, target_size: int = 720, margin_ratio: float = 0.11) -> bool:
@@ -401,26 +567,12 @@ class PythonSCADRenderer:
 
         # Chave baseada no CONTEÚDO do script (mover arquivos entre pastas nunca invalida o cache!)
         content_hash = self._get_script_content_hash(script_path)
-        cache_sig = hashlib.sha1(f"{content_hash}|{preset}|v3".encode("utf-8")).hexdigest()[:20]
+        cache_sig = hashlib.sha1(f"{content_hash}|{preset}|{RENDER_CACHE_VERSION}".encode("utf-8")).hexdigest()[:20]
         final_png = self.cache_dir / f"{cache_sig}.png"
         raw_png = self.cache_dir / f"{cache_sig}_raw.png"
 
         if not force and final_png.exists() and final_png.stat().st_size > 1000:
             return final_png
-
-        # Compatibilidade com cache legado v2 (reaproveita instantaneamente sem re-renderizar!)
-        if not force:
-            stat = script_path.stat()
-            legacy_sig = hashlib.sha1(
-                f"{script_path.resolve()}|{stat.st_mtime_ns}|{stat.st_size}|{preset}|v2".encode("utf-8")
-            ).hexdigest()[:20]
-            legacy_png = self.cache_dir / f"{legacy_sig}.png"
-            if legacy_png.exists() and legacy_png.stat().st_size > 1000:
-                try:
-                    shutil.copy2(legacy_png, final_png)
-                    return final_png
-                except OSError:
-                    return legacy_png
 
         lock = self._get_lock(cache_sig)
         with lock:
@@ -435,15 +587,20 @@ class PythonSCADRenderer:
 
             with self._sem:
                 if self.cli_bin is not None and self.cli_bin.exists():
-                    # 1ª tentativa: PythonSCAD --render (Manifold/CGAL sólido, iluminação limpa e nítida)
-                    ok = self._invoke_pythonscad(script_path, raw_png, camera, use_render=True)
+                    # Cena temporária com arestas reais + todas as diagonais reais (sem --view=edges)
+                    render_py = self._ensure_render_pythonscad(
+                        content_hash, script_path, vertices, faces
+                    ) or script_path
+
+                    # 1ª tentativa: preview OpenGL (preserva cores exatas de faces, arestas e diagonais)
+                    ok = self._invoke_pythonscad(render_py, raw_png, camera, use_render=False)
                     if ok and raw_png.exists():
                         if _studio_postprocess_white(raw_png, final_png):
                             _safe_unlink(raw_png)
                             return final_png
 
-                    # 2ª tentativa (fallback para malhas não convexas com autointerseção): preview OpenCSG
-                    ok = self._invoke_pythonscad(script_path, raw_png, camera, use_render=False)
+                    # 2ª tentativa (fallback): --render Manifold/CGAL
+                    ok = self._invoke_pythonscad(render_py, raw_png, camera, use_render=True)
                     if ok and raw_png.exists():
                         if _studio_postprocess_white(raw_png, final_png):
                             _safe_unlink(raw_png)
@@ -452,10 +609,10 @@ class PythonSCADRenderer:
                     _safe_unlink(raw_png)
 
                 elif self.openscad_bin is not None and self.openscad_bin.exists():
-                    # Linux / GitHub Actions: converte pts/faces para .scad padrão e renderiza via OpenSCAD
-                    std_scad = self._ensure_standard_scad(solid_id, solution_id, script_path, vertices, faces)
+                    # Linux / GitHub Actions: converte pts/faces para .scad com arestas e diagonais reais
+                    std_scad = self._ensure_standard_scad(content_hash, script_path, vertices, faces)
                     if std_scad is not None:
-                        for use_render in (True, False):
+                        for use_render in (False, True):
                             ok = self._invoke_openscad(std_scad, raw_png, camera, use_render=use_render)
                             if ok and raw_png.exists():
                                 if _studio_postprocess_white(raw_png, final_png):
@@ -469,24 +626,58 @@ class PythonSCADRenderer:
                     return final_png
                 return None
 
-    def _ensure_standard_scad(
-        self,
-        solid_id: str,
-        solution_id: str,
-        script_path: Optional[Path],
-        vertices=None,
-        faces=None,
-    ) -> Optional[Path]:
+    def _resolve_geometry(self, script_path: Optional[Path], vertices=None, faces=None):
         if (vertices is None or faces is None) and script_path and script_path.exists():
             from geometry_analyzer import parse_pythonscad_file
             parsed = parse_pythonscad_file(script_path)
             if parsed:
                 vertices, faces = parsed
         if vertices is None or faces is None:
+            return None, None
+        return vertices, faces
+
+    def _ensure_render_pythonscad(
+        self,
+        content_hash: str,
+        script_path: Optional[Path],
+        vertices=None,
+        faces=None,
+    ) -> Optional[Path]:
+        vertices, faces = self._resolve_geometry(script_path, vertices, faces)
+        if vertices is None or faces is None:
             return None
-        safe_key = hashlib.sha1(f"{solid_id}:{solution_id}:scad".encode("utf-8")).hexdigest()[:16]
-        out_scad = self.tmp_dir / f"{safe_key}.scad"
-        out_scad.write_text(_generate_standard_scad(vertices, faces, 20.0), encoding="utf-8")
+        out_py = self.tmp_dir / f"{content_hash}_{RENDER_CACHE_VERSION}.py"
+        if out_py.exists() and out_py.stat().st_size > 100:
+            return out_py
+        scene_lock = self._get_lock(f"scene_py:{content_hash}")
+        with scene_lock:
+            if out_py.exists() and out_py.stat().st_size > 100:
+                return out_py
+            tmp_out = self.tmp_dir / f"{content_hash}_{threading.get_ident()}.tmp.py"
+            tmp_out.write_text(_generate_pythonscad_render_scene(vertices, faces, 20.0), encoding="utf-8")
+            os.replace(tmp_out, out_py)
+        return out_py
+
+    def _ensure_standard_scad(
+        self,
+        content_hash: str,
+        script_path: Optional[Path],
+        vertices=None,
+        faces=None,
+    ) -> Optional[Path]:
+        vertices, faces = self._resolve_geometry(script_path, vertices, faces)
+        if vertices is None or faces is None:
+            return None
+        out_scad = self.tmp_dir / f"{content_hash}_{RENDER_CACHE_VERSION}.scad"
+        if out_scad.exists() and out_scad.stat().st_size > 100:
+            return out_scad
+        scene_lock = self._get_lock(f"scene_scad:{content_hash}")
+        with scene_lock:
+            if out_scad.exists() and out_scad.stat().st_size > 100:
+                return out_scad
+            tmp_out = self.tmp_dir / f"{content_hash}_{threading.get_ident()}.tmp.scad"
+            tmp_out.write_text(_generate_standard_scad(vertices, faces, 20.0), encoding="utf-8")
+            os.replace(tmp_out, out_scad)
         return out_scad
 
     def _invoke_openscad(self, scad_file: Path, out_png: Path, camera: str, use_render: bool) -> bool:
@@ -498,9 +689,8 @@ class PythonSCADRenderer:
             str(self.openscad_bin),
             "--autocenter",
             "--viewall",
-            "--imgsize=1000,1000",
+            "--imgsize=1200,1200",
             "--colorscheme=Tomorrow",
-            "--view=edges",
             "--projection=p",
             f"--camera={camera}",
         ])
@@ -525,7 +715,7 @@ class PythonSCADRenderer:
             import matplotlib
             matplotlib.use("Agg")
             import matplotlib.pyplot as plt
-            from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+            from mpl_toolkits.mplot3d.art3d import Line3DCollection, Poly3DCollection
             from geometry_analyzer import parse_pythonscad_file
 
             if (vertices is None or faces is None) and script_path and script_path.exists():
@@ -566,8 +756,14 @@ class PythonSCADRenderer:
                 rgb = np.clip(base_rgb * shade + 0.08, 0.0, 1.0)
                 face_colors.append((*rgb, 1.0))
 
-            coll = Poly3DCollection(polys, facecolors=face_colors, edgecolors=(0.12, 0.16, 0.24, 0.65), linewidths=1.1)
+            coll = Poly3DCollection(polys, facecolors=face_colors, edgecolors=(0.93, 0.96, 1.0, 0.9), linewidths=1.2)
             ax.add_collection3d(coll)
+
+            _, diags = _extract_real_edges_and_diagonals(faces)
+            if diags:
+                diag_segs = [[V[a], V[b]] for a, b, _ in diags]
+                diag_coll = Line3DCollection(diag_segs, colors=(0.84, 0.91, 1.0, 0.72), linewidths=0.75)
+                ax.add_collection3d(diag_coll)
             lim = 0.85
             ax.set_xlim(-lim, lim)
             ax.set_ylim(-lim, lim)
@@ -588,9 +784,8 @@ class PythonSCADRenderer:
             "--trust-python",
             "--autocenter",
             "--viewall",
-            "--imgsize=800,800",
+            "--imgsize=1200,1200",
             "--colorscheme=Tomorrow",
-            "--view=edges",
             "--projection=p",
             f"--camera={camera}",
         ]
@@ -606,7 +801,7 @@ class PythonSCADRenderer:
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                timeout=25,
+                timeout=45,
                 creationflags=creationflags,
             )
             return res.returncode == 0 and out_png.exists() and out_png.stat().st_size > 500

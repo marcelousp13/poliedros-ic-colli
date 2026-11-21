@@ -141,6 +141,7 @@ def build_static_atlas(
     skip_verify: bool = False,
     extra_source_dirs: List[Path] | None = None,
     reset_site: bool = False,
+    force_renders: bool = False,
 ) -> Dict[str, Any]:
     output_dir = Path(output_dir).resolve()
     data_dir = output_dir / "data"
@@ -342,7 +343,7 @@ def build_static_atlas(
                 png_name = f"{slug}_{geom_hash}_{preset}.png"
                 target_png = renders_dir / png_name
                 used_render_names.add(png_name)
-                if target_png.exists() and target_png.stat().st_size > 1000:
+                if not force_renders and target_png.exists() and target_png.stat().st_size > 1000:
                     stats["renders_reused"] += 1
                     render_map[preset] = f"./renders/{png_name}"
                 else:
@@ -502,6 +503,7 @@ def build_static_atlas(
                 preset=preset,
                 vertices=verts,
                 faces=faces,
+                force=force_renders,
             )
             if rendered and rendered.exists():
                 shutil.copy2(rendered, target_png)
@@ -574,6 +576,7 @@ if __name__ == "__main__":
     parser.add_argument("--presets", nargs="+", default=list(CAMERA_PRESETS.keys()), help="Ângulos a renderizar")
     parser.add_argument("--fontes", nargs="*", default=[], help="Pastas adicionais de mínimos (ex.: pasta de Colli ou Thomas)")
     parser.add_argument("--reset-site", action="store_true", help="Reconstrói do zero ignorando base anterior de docs/data/")
+    parser.add_argument("--regerar-fotos", action="store_true", help="Força regeração de todas as fotografias PNG em docs/renders/")
     parser.add_argument("--skip-verify", action="store_true", help="Pula re-validação oficial (não recomendado)")
     args = parser.parse_args()
     build_static_atlas(
@@ -582,4 +585,5 @@ if __name__ == "__main__":
         skip_verify=args.skip_verify,
         extra_source_dirs=[Path(p) for p in args.fontes],
         reset_site=args.reset_site,
+        force_renders=args.regerar_fotos,
     )
