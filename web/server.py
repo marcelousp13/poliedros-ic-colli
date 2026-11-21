@@ -768,9 +768,11 @@ class AtlasRequestHandler(BaseHTTPRequestHandler):
                 solid_id = urllib.parse.unquote(parts[0])
                 sol_id = urllib.parse.unquote(parts[1][:-4])
                 preset = (qs.get("preset", ["iso"])[0] or "iso").lower()
+                include_diags = qs.get("diagonals", ["1"])[0] != "0"
                 force = qs.get("force", ["0"])[0] == "1"
                 version_tag = (qs.get("v", [""])[0] or "").strip()
                 geom_hash = self.srv.catalog.get_geom_hash(solid_id, sol_id) or (version_tag if len(version_tag) == 14 else None)
+                dtag = "d1" if include_diags else "d0"
 
                 # Caminho ultra-rápido: RAM ou docs/renders/ sem precisar listar pastas de solidos/
                 png_res = None
@@ -782,9 +784,10 @@ class AtlasRequestHandler(BaseHTTPRequestHandler):
                         preset=preset,
                         geom_hash=geom_hash,
                         force=False,
+                        include_diagonals=include_diags,
                     ) if (
-                        self.srv.renderer._get_mem_png(f"{solid_id}|{sol_id}|{preset}|{geom_hash or ''}") is not None
-                        or self.srv.renderer._find_docs_render(solid_id, preset, geom_hash) is not None
+                        self.srv.renderer._get_mem_png(f"{solid_id}|{sol_id}|{preset}|{geom_hash or ''}|{dtag}") is not None
+                        or self.srv.renderer._find_docs_render(solid_id, preset, geom_hash, include_diagonals=include_diags) is not None
                     ) else None
 
                 if png_res is None:
@@ -811,6 +814,7 @@ class AtlasRequestHandler(BaseHTTPRequestHandler):
                         faces=faces,
                         geom_hash=geom_hash,
                         force=force,
+                        include_diagonals=include_diags,
                     )
 
                 if png_res is None:
@@ -836,14 +840,21 @@ class AtlasRequestHandler(BaseHTTPRequestHandler):
                     return
                 if kind == "png":
                     preset = (qs.get("preset", ["iso"])[0] or "iso").lower()
+                    include_diags = qs.get("diagonals", ["1"])[0] != "0"
                     geom_hash = self.srv.catalog.get_geom_hash(solid_id, sol_id)
                     png_res = self.srv.renderer.get_png_bytes(
-                        solid_id, sol_id, files.get("scad"), preset=preset, geom_hash=geom_hash
+                        solid_id,
+                        sol_id,
+                        files.get("scad"),
+                        preset=preset,
+                        geom_hash=geom_hash,
+                        include_diagonals=include_diags,
                     )
                     if not png_res:
                         self._send_json({"error": "Render indisponível."}, HTTPStatus.NOT_FOUND)
                         return
-                    self._send_bytes(png_res[0], "image/png", filename=f"{solid_id}_{sol_id}.png")
+                    suffix = "" if include_diags else "_sem_diagonais"
+                    self._send_bytes(png_res[0], "image/png", filename=f"{solid_id}_{sol_id}{suffix}.png")
                     return
                 target = files.get(kind)
                 if not target or not target.exists():

@@ -32,13 +32,16 @@
     discSort: "canonical",
     discView: "grid",
 
+    // Preferência de diagonais nas fotos PythonSCAD da galeria
+    galleryShowDiagonals: true,
+
     // Modal de Dossiê
     modalDetail: null,
     modalSolIndex: 0,
     modalMode: "photo",
     modalPreset: "iso",
     modalDataTab: "vertices",
-    modalShowDiagonals3D: true,
+    modalShowDiagonals: true,
     viewer3D: null,
   };
 
@@ -70,21 +73,25 @@
     return n.toFixed(Math.min(digits + 2, 6));
   }
 
-  function getRenderUrl(solid, sol, preset = "iso") {
+  function getRenderUrl(solid, sol, preset = "iso", showDiagonals = true) {
     if (state.mode === "static") {
-      return sol?.renders?.[preset] || sol?.renders?.iso || "";
+      const map = showDiagonals ? sol?.renders : (sol?.renders_clean || sol?.renders);
+      return map?.[preset] || map?.iso || sol?.renders?.[preset] || sol?.renders?.iso || "";
     }
     const v = sol?.geom_hash ? `&v=${encodeURIComponent(sol.geom_hash)}` : "";
-    return `/api/render/${encodeURIComponent(solid.id)}/${encodeURIComponent(sol.solution_id)}.png?preset=${encodeURIComponent(preset)}${v}`;
+    const d = showDiagonals ? "" : "&diagonals=0";
+    return `/api/render/${encodeURIComponent(solid.id)}/${encodeURIComponent(sol.solution_id)}.png?preset=${encodeURIComponent(preset)}${d}${v}`;
   }
 
-  function getDownloadUrl(solid, sol, kind, preset = "iso") {
+  function getDownloadUrl(solid, sol, kind, preset = "iso", showDiagonals = true) {
     if (state.mode === "static") {
-      if (kind === "png") return getRenderUrl(solid, sol, preset);
+      if (kind === "png") return getRenderUrl(solid, sol, preset, showDiagonals);
       return sol?.downloads?.[kind] || "";
     }
     const base = `/api/download/${encodeURIComponent(solid.id)}/${encodeURIComponent(sol.solution_id)}/${encodeURIComponent(kind)}`;
-    return kind === "png" ? `${base}?preset=${encodeURIComponent(preset)}` : base;
+    if (kind !== "png") return base;
+    const d = showDiagonals ? "" : "&diagonals=0";
+    return `${base}?preset=${encodeURIComponent(preset)}${d}`;
   }
 
   function showToast(htmlMsg, variant = "info", duration = 3600) {
@@ -271,7 +278,7 @@
   // ==========================================================================
   function renderResultados() {
     if (!state.catalog) return;
-    const sig = `${state.catalogVersion}|${state.resSearch}|${state.resFamily}|${state.resStatus}|${state.resSort}|${state.resView}`;
+    const sig = `${state.catalogVersion}|${state.resSearch}|${state.resFamily}|${state.resStatus}|${state.resSort}|${state.resView}|${state.galleryShowDiagonals}`;
     if (state.lastRenderSig.resultados === sig) return;
     state.lastRenderSig.resultados = sig;
 
@@ -331,7 +338,7 @@
   // ==========================================================================
   function renderDescobertas() {
     if (!state.catalog) return;
-    const sig = `${state.catalogVersion}|${state.discSearch}|${state.discFamily}|${state.discStatus}|${state.discSort}|${state.discView}`;
+    const sig = `${state.catalogVersion}|${state.discSearch}|${state.discFamily}|${state.discStatus}|${state.discSort}|${state.discView}|${state.galleryShowDiagonals}`;
     if (state.lastRenderSig.descobertas === sig) return;
     state.lastRenderSig.descobertas = sig;
 
@@ -441,7 +448,7 @@
 
     let photoHtml = "";
     if (hasPhoto) {
-      const imgUrl = getRenderUrl(solid, sol, "iso");
+      const imgUrl = getRenderUrl(solid, sol, "iso", state.galleryShowDiagonals);
       const badgeCls = sol.is_convex ? "badge-convex" : "badge-discovery";
       const badgeTxt = sol.is_convex ? "Convexo" : "Não convexo";
       const isAboveFold = index < 8;
@@ -532,7 +539,7 @@
         const sol = getPrimarySolutionForTab(s, isDiscoveryTab);
         const hasPhoto = Boolean(sol);
         const thumb = hasPhoto
-          ? `<img class="table-thumb" src="${esc(getRenderUrl(s, sol, "iso"))}" alt="${esc(s.display_code)}" loading="lazy"/>`
+          ? `<img class="table-thumb" src="${esc(getRenderUrl(s, sol, "iso", state.galleryShowDiagonals))}" alt="${esc(s.display_code)}" loading="lazy"/>`
           : `<span class="mono muted-xs">—</span>`;
 
         const statusBadge = hasPhoto
@@ -621,6 +628,7 @@
       state.modalMode = "photo";
       state.modalPreset = "iso";
       state.modalDataTab = "vertices";
+      state.modalShowDiagonals = state.galleryShowDiagonals;
 
       let idx = 0;
       if (preferredSolId && detail.global_solutions.length > 0) {
@@ -685,7 +693,19 @@
       { key: "alt", label: "Alt" },
     ];
 
-    const imgUrl = getRenderUrl(detail, sol, state.modalPreset);
+    const diagCount = countFaceDiagonals(sol.faces);
+    const hasDiags = diagCount > 0;
+    const diagActive = hasDiags && state.modalShowDiagonals;
+    const diagStyle = diagActive
+      ? "border-color:var(--ink);background:var(--ink);color:#fff;"
+      : hasDiags
+        ? ""
+        : "opacity:0.45;cursor:not-allowed;";
+    const diagLabel = hasDiags
+      ? `Diagonais (${diagCount}): ${diagActive ? "On" : "Off"}`
+      : "Diagonais (0)";
+
+    const imgUrl = getRenderUrl(detail, sol, state.modalPreset, diagActive);
     const stageContent =
       state.modalMode === "photo"
         ? `<img id="modal-scad-img" src="${esc(imgUrl)}" alt="${esc(detail.display_code)}" />`
@@ -694,7 +714,7 @@
     const cameraBar =
       state.modalMode === "photo"
         ? `<div class="camera-bar">
-            <span class="mono muted-xs">PythonSCAD</span>
+            <button type="button" class="btn-tiny" id="btn-toggle-diagonals-scad" style="${diagStyle}" ${hasDiags ? "" : "disabled"} title="Alternar exibição de todas as diagonais reais no PythonSCAD">${diagLabel}</button>
             <div style="display:flex;gap:4px;">
               ${cameraPresets
                 .map(
@@ -704,26 +724,13 @@
                 .join("")}
             </div>
           </div>`
-        : (() => {
-            const diagCount = countFaceDiagonals(sol.faces);
-            const hasDiags = diagCount > 0;
-            const diagActive = hasDiags && state.modalShowDiagonals3D;
-            const diagStyle = diagActive
-              ? "border-color:var(--ink);background:var(--ink);color:#fff;"
-              : hasDiags
-                ? ""
-                : "opacity:0.45;cursor:not-allowed;";
-            const diagLabel = hasDiags
-              ? `Diagonais (${diagCount}): ${diagActive ? "On" : "Off"}`
-              : "Diagonais (0)";
-            return `<div class="camera-bar">
+        : `<div class="camera-bar">
             <span class="mono muted-xs">Arraste · Zoom</span>
             <div style="display:flex;gap:4px;">
               <button type="button" class="btn-tiny" id="btn-toggle-diagonals-3d" style="${diagStyle}" ${hasDiags ? "" : "disabled"} title="Alternar exibição de todas as diagonais reais de cada face">${diagLabel}</button>
               <button type="button" class="btn-tiny" id="btn-reset-3d">Reset</button>
             </div>
           </div>`;
-          })();
 
     const topo = detail.topology;
     const h = sol.hessian;
@@ -731,7 +738,7 @@
     const dlScad = getDownloadUrl(detail, sol, "scad");
     const dlJson = getDownloadUrl(detail, sol, "json");
     const dlTxt = getDownloadUrl(detail, sol, "txt");
-    const dlPng = getDownloadUrl(detail, sol, "png", state.modalPreset);
+    const dlPng = getDownloadUrl(detail, sol, "png", state.modalPreset, diagActive);
 
     $("#modal-body").innerHTML = `
       ${switcherHtml}
@@ -754,7 +761,7 @@
             ${sol.has_scad && dlScad ? `<a class="btn btn-secondary btn-sm" href="${esc(dlScad)}" download>.py</a>` : ""}
             ${sol.has_json && dlJson ? `<a class="btn btn-secondary btn-sm" href="${esc(dlJson)}" download>.json</a>` : ""}
             ${sol.has_txt && dlTxt ? `<a class="btn btn-secondary btn-sm" href="${esc(dlTxt)}" download>.txt</a>` : ""}
-            ${dlPng ? `<a class="btn btn-secondary btn-sm" href="${esc(dlPng)}" download>.png</a>` : ""}
+            ${dlPng ? `<a class="btn btn-secondary btn-sm" id="btn-download-png" href="${esc(dlPng)}" download>.png</a>` : ""}
           </div>
         </div>
 
@@ -836,19 +843,38 @@
       });
     }
 
+    if (state.modalMode === "photo") {
+      const scadDiagBtn = $("#btn-toggle-diagonals-scad");
+      if (scadDiagBtn && !scadDiagBtn.disabled) {
+        scadDiagBtn.addEventListener("click", () => {
+          state.modalShowDiagonals = !state.modalShowDiagonals;
+          const active = state.modalShowDiagonals;
+          scadDiagBtn.textContent = `Diagonais (${diagCount}): ${active ? "On" : "Off"}`;
+          scadDiagBtn.style.borderColor = active ? "var(--ink)" : "";
+          scadDiagBtn.style.background = active ? "var(--ink)" : "";
+          scadDiagBtn.style.color = active ? "#fff" : "";
+          const imgEl = $("#modal-scad-img");
+          if (imgEl) imgEl.src = getRenderUrl(detail, sol, state.modalPreset, active);
+          const dlPngEl = $("#btn-download-png");
+          if (dlPngEl) dlPngEl.href = getDownloadUrl(detail, sol, "png", state.modalPreset, active);
+        });
+      }
+    }
+
     if (state.modalMode === "3d") {
-      initViewer3D($("#modal-3d-canvas"), sol.vertices, sol.faces, !sol.is_convex, state.modalShowDiagonals3D);
+      initViewer3D($("#modal-3d-canvas"), sol.vertices, sol.faces, !sol.is_convex, state.modalShowDiagonals);
       const diagBtn = $("#btn-toggle-diagonals-3d");
       if (diagBtn && !diagBtn.disabled) {
-        const diagCount = countFaceDiagonals(sol.faces);
         diagBtn.addEventListener("click", () => {
-          state.modalShowDiagonals3D = !state.modalShowDiagonals3D;
-          const active = state.modalShowDiagonals3D;
+          state.modalShowDiagonals = !state.modalShowDiagonals;
+          const active = state.modalShowDiagonals;
           diagBtn.textContent = `Diagonais (${diagCount}): ${active ? "On" : "Off"}`;
           diagBtn.style.borderColor = active ? "var(--ink)" : "";
           diagBtn.style.background = active ? "var(--ink)" : "";
           diagBtn.style.color = active ? "#fff" : "";
           state.viewer3D?.setShowDiagonals(active);
+          const dlPngEl = $("#btn-download-png");
+          if (dlPngEl) dlPngEl.href = getDownloadUrl(detail, sol, "png", state.modalPreset, active);
         });
       }
       $("#btn-reset-3d")?.addEventListener("click", () => state.viewer3D?.reset());
@@ -1135,6 +1161,21 @@
     });
     $("#disc-status-filter").addEventListener("change", (e) => { state.discStatus = e.target.value; renderDescobertas(); });
     $("#disc-sort").addEventListener("change", (e) => { state.discSort = e.target.value; renderDescobertas(); });
+
+    $$("[data-toggle-gallery-diagonals]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        state.galleryShowDiagonals = !state.galleryShowDiagonals;
+        const active = state.galleryShowDiagonals;
+        $$("[data-toggle-gallery-diagonals]").forEach((b) => {
+          b.textContent = `Diagonais: ${active ? "On" : "Off"}`;
+          b.style.borderColor = active ? "var(--ink)" : "";
+          b.style.background = active ? "var(--ink)" : "";
+          b.style.color = active ? "#fff" : "";
+        });
+        if (state.activeTab === "resultados") renderResultados();
+        else renderDescobertas();
+      });
+    });
 
     $$(".view-btn[data-target]").forEach((btn) => {
       btn.addEventListener("click", () => {

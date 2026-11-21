@@ -339,6 +339,8 @@ def build_static_atlas(
             geom_hash = sol.get("geom_hash") or _compute_geom_hash(sol["vertices"], sol["faces"])
 
             render_map: Dict[str, str] = {}
+            render_clean_map: Dict[str, str] = {}
+            has_face_diags = any(len(f) >= 4 for f in sol["faces"])
             for preset in presets:
                 png_name = f"{slug}_{geom_hash}_{preset}.png"
                 target_png = renders_dir / png_name
@@ -350,8 +352,24 @@ def build_static_atlas(
                     render_map[preset] = f"./renders/{png_name}"
                     render_jobs.append((
                         sid, sol_id, scad_path, preset,
-                        sol["vertices"], sol["faces"], target_png, render_map,
+                        sol["vertices"], sol["faces"], target_png, render_map, True,
                     ))
+
+                if has_face_diags:
+                    clean_name = f"{slug}_{geom_hash}_{preset}_clean.png"
+                    clean_png = renders_dir / clean_name
+                    used_render_names.add(clean_name)
+                    if not force_renders and clean_png.exists() and clean_png.stat().st_size > 1000:
+                        stats["renders_reused"] += 1
+                        render_clean_map[preset] = f"./renders/{clean_name}"
+                    else:
+                        render_clean_map[preset] = f"./renders/{clean_name}"
+                        render_jobs.append((
+                            sid, sol_id, scad_path, preset,
+                            sol["vertices"], sol["faces"], clean_png, render_clean_map, False,
+                        ))
+                else:
+                    render_clean_map[preset] = render_map[preset]
 
             # Copia arquivos oficiais para downloads estáticos (ou preserva os já existentes em docs/files/)
             sol_files_dir = files_dir / slug / cat_folder
@@ -398,6 +416,7 @@ def build_static_atlas(
                 "has_json": "json" in dl_map,
                 "has_txt": "txt" in dl_map,
                 "renders": render_map,
+                "renders_clean": render_clean_map,
                 "downloads": dl_map,
                 "vertices": sol["vertices"],
                 "faces": sol["faces"],
@@ -452,6 +471,7 @@ def build_static_atlas(
                 "classification": s["classification"],
                 "verified_official": s["verified_official"],
                 "renders": s["renders"],
+                "renders_clean": s.get("renders_clean", s["renders"]),
                 "convexity": {
                     "volume": s["convexity"]["volume"],
                     "hull_volume": s["convexity"]["hull_volume"],
@@ -495,7 +515,7 @@ def build_static_atlas(
         print(f"[Atlas] Renderizando {len(render_jobs)} fotografia(s) via {renderer.engine_name} em paralelo...")
 
         def _run_job(job):
-            sid, sol_id, scad_path, preset, verts, faces, target_png, render_map = job
+            sid, sol_id, scad_path, preset, verts, faces, target_png, render_map, include_diags = job
             rendered = renderer.render_solution_png(
                 solid_id=sid,
                 solution_id=sol_id,
@@ -504,6 +524,7 @@ def build_static_atlas(
                 vertices=verts,
                 faces=faces,
                 force=force_renders,
+                include_diagonals=include_diags,
             )
             if rendered and rendered.exists():
                 shutil.copy2(rendered, target_png)

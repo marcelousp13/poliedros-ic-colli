@@ -174,11 +174,16 @@ def _compute_wireframe_radii(vertices) -> Tuple[float, float, float]:
     return r_edge, r_diag_std, r_diag_dense
 
 
-def _generate_pythonscad_render_scene(vertices, faces, scale_factor: float = 20.0) -> str:
+def _generate_pythonscad_render_scene(
+    vertices,
+    faces,
+    scale_factor: float = 20.0,
+    include_diagonals: bool = True,
+) -> str:
     """
     Gera cena temporária PythonSCAD com o poliedro sólido + todas as arestas reais
-    de contorno + todas as diagonais reais de cada face (via cilindros com multmatrix,
-    eliminando as linhas falsas de triangulação do --view=edges).
+    de contorno + (opcionalmente) todas as diagonais reais de cada face (via cilindros
+    com multmatrix, eliminando as linhas falsas de triangulação do --view=edges).
     """
     edges, diags = _extract_real_edges_and_diagonals(faces)
     r_edge, r_diag_std, r_diag_dense = _compute_wireframe_radii(vertices)
@@ -204,26 +209,32 @@ def _generate_pythonscad_render_scene(vertices, faces, scale_factor: float = 20.
         lines.append(
             f"parts.append(color(multmatrix(cylinder(h={length:.8f}, r={r_edge:.6f}, fn=10), {mat}), {edge_col}))"
         )
-    diag_std_col = list(DIAG_COLOR_STD_RGB)
-    diag_dense_col = list(DIAG_COLOR_DENSE_RGB)
-    for a, b, m in diags:
-        length, mat = _segment_transform_matrix(pts_clean[a], pts_clean[b])
-        if mat is None:
-            continue
-        r_d = r_diag_dense if m >= 8 else r_diag_std
-        col = diag_dense_col if m >= 8 else diag_std_col
-        lines.append(
-            f"parts.append(color(multmatrix(cylinder(h={length:.8f}, r={r_d:.6f}, fn=10), {mat}), {col}))"
-        )
+    if include_diagonals:
+        diag_std_col = list(DIAG_COLOR_STD_RGB)
+        diag_dense_col = list(DIAG_COLOR_DENSE_RGB)
+        for a, b, m in diags:
+            length, mat = _segment_transform_matrix(pts_clean[a], pts_clean[b])
+            if mat is None:
+                continue
+            r_d = r_diag_dense if m >= 8 else r_diag_std
+            col = diag_dense_col if m >= 8 else diag_std_col
+            lines.append(
+                f"parts.append(color(multmatrix(cylinder(h={length:.8f}, r={r_d:.6f}, fn=10), {mat}), {col}))"
+            )
     lines.append(f"obj = scale(union(*parts), {scale_factor})")
     lines.append("show(obj)")
     return "\n".join(lines) + "\n"
 
 
-def _generate_standard_scad(vertices, faces, scale_factor: float = 20.0) -> str:
+def _generate_standard_scad(
+    vertices,
+    faces,
+    scale_factor: float = 20.0,
+    include_diagonals: bool = True,
+) -> str:
     """
     Converte vértices e faces para sintaxe OpenSCAD padrão (.scad) com arestas reais
-    e todas as diagonais reais de cada face (para renderização headless no Linux/CI).
+    e (opcionalmente) todas as diagonais reais de cada face (para renderização headless no Linux/CI).
     """
     edges, diags = _extract_real_edges_and_diagonals(faces)
     r_edge, r_diag_std, r_diag_dense = _compute_wireframe_radii(vertices)
@@ -247,24 +258,25 @@ def _generate_standard_scad(vertices, faces, scale_factor: float = 20.0) -> str:
         lines.append(f"    multmatrix({mat}) cylinder(h={length:.8f}, r={r_edge:.6f}, $fn=10);")
     lines.append("  }")
 
-    diags_std = [(a, b) for a, b, m in diags if m < 8]
-    diags_dense = [(a, b) for a, b, m in diags if m >= 8]
-    if diags_std:
-        lines.append(f"  color({list(DIAG_COLOR_STD_RGB)}) {{")
-        for a, b in diags_std:
-            length, mat = _segment_transform_matrix(vertices[a], vertices[b])
-            if mat is None:
-                continue
-            lines.append(f"    multmatrix({mat}) cylinder(h={length:.8f}, r={r_diag_std:.6f}, $fn=10);")
-        lines.append("  }")
-    if diags_dense:
-        lines.append(f"  color({list(DIAG_COLOR_DENSE_RGB)}) {{")
-        for a, b in diags_dense:
-            length, mat = _segment_transform_matrix(vertices[a], vertices[b])
-            if mat is None:
-                continue
-            lines.append(f"    multmatrix({mat}) cylinder(h={length:.8f}, r={r_diag_dense:.6f}, $fn=10);")
-        lines.append("  }")
+    if include_diagonals:
+        diags_std = [(a, b) for a, b, m in diags if m < 8]
+        diags_dense = [(a, b) for a, b, m in diags if m >= 8]
+        if diags_std:
+            lines.append(f"  color({list(DIAG_COLOR_STD_RGB)}) {{")
+            for a, b in diags_std:
+                length, mat = _segment_transform_matrix(vertices[a], vertices[b])
+                if mat is None:
+                    continue
+                lines.append(f"    multmatrix({mat}) cylinder(h={length:.8f}, r={r_diag_std:.6f}, $fn=10);")
+            lines.append("  }")
+        if diags_dense:
+            lines.append(f"  color({list(DIAG_COLOR_DENSE_RGB)}) {{")
+            for a, b in diags_dense:
+                length, mat = _segment_transform_matrix(vertices[a], vertices[b])
+                if mat is None:
+                    continue
+                lines.append(f"    multmatrix({mat}) cylinder(h={length:.8f}, r={r_diag_dense:.6f}, $fn=10);")
+            lines.append("  }")
 
     lines.append("}")
     return "\n".join(lines) + "\n"
@@ -407,11 +419,18 @@ class PythonSCADRenderer:
                 self._mem_png_cache.popitem(last=False)
         return raw, etag
 
-    def _find_docs_render(self, solid_id: str, preset: str, geom_hash: Optional[str]) -> Optional[Path]:
+    def _find_docs_render(
+        self,
+        solid_id: str,
+        preset: str,
+        geom_hash: Optional[str],
+        include_diagonals: bool = True,
+    ) -> Optional[Path]:
         """Reaproveita instantaneamente renders já existentes em docs/renders/ sem invocar PythonSCAD."""
         if not geom_hash or not self.docs_renders_dir.is_dir():
             return None
-        cand = self.docs_renders_dir / f"{_safe_slug(solid_id)}_{geom_hash}_{preset}.png"
+        suffix = "" if include_diagonals else "_clean"
+        cand = self.docs_renders_dir / f"{_safe_slug(solid_id)}_{geom_hash}_{preset}{suffix}.png"
         if cand.is_file() and cand.stat().st_size > 1000:
             return cand
         return None
@@ -464,17 +483,19 @@ class PythonSCADRenderer:
         faces=None,
         geom_hash: Optional[str] = None,
         force: bool = False,
+        include_diagonals: bool = True,
     ) -> Optional[Tuple[bytes, str]]:
         """
         Retorna (png_bytes, etag) priorizando RAM -> docs/renders/ -> web/cache/renders/ -> render sob demanda.
         """
-        mem_key = f"{solid_id}|{solution_id}|{preset}|{geom_hash or ''}"
+        dtag = "d1" if include_diagonals else "d0"
+        mem_key = f"{solid_id}|{solution_id}|{preset}|{geom_hash or ''}|{dtag}"
         if not force:
             hit = self._get_mem_png(mem_key)
             if hit is not None:
                 return hit
 
-            docs_png = self._find_docs_render(solid_id, preset, geom_hash)
+            docs_png = self._find_docs_render(solid_id, preset, geom_hash, include_diagonals=include_diagonals)
             if docs_png is not None:
                 raw = docs_png.read_bytes()
                 etag = f'"{hashlib.sha1(raw).hexdigest()[:16]}"'
@@ -489,6 +510,7 @@ class PythonSCADRenderer:
             faces=faces,
             geom_hash=geom_hash,
             force=force,
+            include_diagonals=include_diagonals,
         )
         if not png_path or not png_path.exists():
             return None
@@ -552,12 +574,13 @@ class PythonSCADRenderer:
         faces=None,
         geom_hash: Optional[str] = None,
         force: bool = False,
+        include_diagonals: bool = True,
     ) -> Optional[Path]:
         """Renderiza (ou recupera do cache por conteúdo / docs/renders/) a fotografia PNG do sólido via PythonSCAD."""
         camera = CAMERA_PRESETS.get(preset, CAMERA_PRESETS["iso"])
 
         if not force:
-            docs_png = self._find_docs_render(solid_id, preset, geom_hash)
+            docs_png = self._find_docs_render(solid_id, preset, geom_hash, include_diagonals=include_diagonals)
             if docs_png is not None:
                 return docs_png
 
@@ -565,9 +588,22 @@ class PythonSCADRenderer:
         if script_path is None or not script_path.exists():
             return None
 
+        # Para sólidos puramente triangulares (sem faces m >= 4), com/sem diagonais são idênticos
+        effective_diags = bool(include_diagonals)
+        if not effective_diags:
+            rv, rf = self._resolve_geometry(script_path, vertices, faces)
+            if rf is not None and not any(len(f) >= 4 for f in rf):
+                effective_diags = True
+                if not force:
+                    docs_png = self._find_docs_render(solid_id, preset, geom_hash, include_diagonals=True)
+                    if docs_png is not None:
+                        return docs_png
+
+        variant_tag = RENDER_CACHE_VERSION if effective_diags else f"{RENDER_CACHE_VERSION}_clean"
+
         # Chave baseada no CONTEÚDO do script (mover arquivos entre pastas nunca invalida o cache!)
         content_hash = self._get_script_content_hash(script_path)
-        cache_sig = hashlib.sha1(f"{content_hash}|{preset}|{RENDER_CACHE_VERSION}".encode("utf-8")).hexdigest()[:20]
+        cache_sig = hashlib.sha1(f"{content_hash}|{preset}|{variant_tag}".encode("utf-8")).hexdigest()[:20]
         final_png = self.cache_dir / f"{cache_sig}.png"
         raw_png = self.cache_dir / f"{cache_sig}_raw.png"
 
@@ -587,9 +623,9 @@ class PythonSCADRenderer:
 
             with self._sem:
                 if self.cli_bin is not None and self.cli_bin.exists():
-                    # Cena temporária com arestas reais + todas as diagonais reais (sem --view=edges)
+                    # Cena temporária com arestas reais (+ diagonais reais se effective_diags=True)
                     render_py = self._ensure_render_pythonscad(
-                        content_hash, script_path, vertices, faces
+                        content_hash, script_path, vertices, faces, include_diagonals=effective_diags
                     ) or script_path
 
                     # 1ª tentativa: preview OpenGL (preserva cores exatas de faces, arestas e diagonais)
@@ -609,8 +645,10 @@ class PythonSCADRenderer:
                     _safe_unlink(raw_png)
 
                 elif self.openscad_bin is not None and self.openscad_bin.exists():
-                    # Linux / GitHub Actions: converte pts/faces para .scad com arestas e diagonais reais
-                    std_scad = self._ensure_standard_scad(content_hash, script_path, vertices, faces)
+                    # Linux / GitHub Actions: converte pts/faces para .scad com arestas (e diagonais se ativo)
+                    std_scad = self._ensure_standard_scad(
+                        content_hash, script_path, vertices, faces, include_diagonals=effective_diags
+                    )
                     if std_scad is not None:
                         for use_render in (False, True):
                             ok = self._invoke_openscad(std_scad, raw_png, camera, use_render=use_render)
@@ -622,7 +660,9 @@ class PythonSCADRenderer:
 
                 # 3ª tentativa (fallback científico otimizado via Matplotlib 3D):
                 # garante foto mesmo sem PythonSCAD/OpenSCAD instalado ou em malha patológica
-                if self._render_matplotlib_fallback(script_path, final_png, preset, vertices, faces):
+                if self._render_matplotlib_fallback(
+                    script_path, final_png, preset, vertices, faces, include_diagonals=effective_diags
+                ):
                     return final_png
                 return None
 
@@ -642,19 +682,24 @@ class PythonSCADRenderer:
         script_path: Optional[Path],
         vertices=None,
         faces=None,
+        include_diagonals: bool = True,
     ) -> Optional[Path]:
         vertices, faces = self._resolve_geometry(script_path, vertices, faces)
         if vertices is None or faces is None:
             return None
-        out_py = self.tmp_dir / f"{content_hash}_{RENDER_CACHE_VERSION}.py"
+        tag = RENDER_CACHE_VERSION if include_diagonals else f"{RENDER_CACHE_VERSION}_clean"
+        out_py = self.tmp_dir / f"{content_hash}_{tag}.py"
         if out_py.exists() and out_py.stat().st_size > 100:
             return out_py
-        scene_lock = self._get_lock(f"scene_py:{content_hash}")
+        scene_lock = self._get_lock(f"scene_py:{content_hash}:{tag}")
         with scene_lock:
             if out_py.exists() and out_py.stat().st_size > 100:
                 return out_py
-            tmp_out = self.tmp_dir / f"{content_hash}_{threading.get_ident()}.tmp.py"
-            tmp_out.write_text(_generate_pythonscad_render_scene(vertices, faces, 20.0), encoding="utf-8")
+            tmp_out = self.tmp_dir / f"{content_hash}_{tag}_{threading.get_ident()}.tmp.py"
+            tmp_out.write_text(
+                _generate_pythonscad_render_scene(vertices, faces, 20.0, include_diagonals=include_diagonals),
+                encoding="utf-8",
+            )
             os.replace(tmp_out, out_py)
         return out_py
 
@@ -664,19 +709,24 @@ class PythonSCADRenderer:
         script_path: Optional[Path],
         vertices=None,
         faces=None,
+        include_diagonals: bool = True,
     ) -> Optional[Path]:
         vertices, faces = self._resolve_geometry(script_path, vertices, faces)
         if vertices is None or faces is None:
             return None
-        out_scad = self.tmp_dir / f"{content_hash}_{RENDER_CACHE_VERSION}.scad"
+        tag = RENDER_CACHE_VERSION if include_diagonals else f"{RENDER_CACHE_VERSION}_clean"
+        out_scad = self.tmp_dir / f"{content_hash}_{tag}.scad"
         if out_scad.exists() and out_scad.stat().st_size > 100:
             return out_scad
-        scene_lock = self._get_lock(f"scene_scad:{content_hash}")
+        scene_lock = self._get_lock(f"scene_scad:{content_hash}:{tag}")
         with scene_lock:
             if out_scad.exists() and out_scad.stat().st_size > 100:
                 return out_scad
-            tmp_out = self.tmp_dir / f"{content_hash}_{threading.get_ident()}.tmp.scad"
-            tmp_out.write_text(_generate_standard_scad(vertices, faces, 20.0), encoding="utf-8")
+            tmp_out = self.tmp_dir / f"{content_hash}_{tag}_{threading.get_ident()}.tmp.scad"
+            tmp_out.write_text(
+                _generate_standard_scad(vertices, faces, 20.0, include_diagonals=include_diagonals),
+                encoding="utf-8",
+            )
             os.replace(tmp_out, out_scad)
         return out_scad
 
@@ -710,6 +760,7 @@ class PythonSCADRenderer:
         preset: str,
         vertices=None,
         faces=None,
+        include_diagonals: bool = True,
     ) -> bool:
         try:
             import matplotlib
@@ -759,11 +810,12 @@ class PythonSCADRenderer:
             coll = Poly3DCollection(polys, facecolors=face_colors, edgecolors=(0.93, 0.96, 1.0, 0.9), linewidths=1.2)
             ax.add_collection3d(coll)
 
-            _, diags = _extract_real_edges_and_diagonals(faces)
-            if diags:
-                diag_segs = [[V[a], V[b]] for a, b, _ in diags]
-                diag_coll = Line3DCollection(diag_segs, colors=(0.84, 0.91, 1.0, 0.72), linewidths=0.75)
-                ax.add_collection3d(diag_coll)
+            if include_diagonals:
+                _, diags = _extract_real_edges_and_diagonals(faces)
+                if diags:
+                    diag_segs = [[V[a], V[b]] for a, b, _ in diags]
+                    diag_coll = Line3DCollection(diag_segs, colors=(0.84, 0.91, 1.0, 0.72), linewidths=0.75)
+                    ax.add_collection3d(diag_coll)
             lim = 0.85
             ax.set_xlim(-lim, lim)
             ax.set_ylim(-lim, lim)
