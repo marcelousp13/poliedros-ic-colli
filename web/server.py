@@ -63,7 +63,13 @@ from geometry_analyzer import (
     CatalogService,
     iter_global_category_dirs,
 )
-from github_sync import load_github_config, sync_global_solutions_to_github
+from github_sync import (
+    _fetch_pages_json_file,
+    has_remote_publish_credentials,
+    load_github_config,
+    pull_new_minima_from_github,
+    sync_global_solutions_to_github,
+)
 from scad_renderer import CAMERA_PRESETS, PythonSCADRenderer
 from validador_cientifico import ValidadorCientifico
 from verificadores.isomorfismo import construir_matriz_distancias
@@ -458,10 +464,22 @@ class SolidosLiveWatcher:
                     added = [p for p in cur if p not in self._last_snapshot]
                     self._last_snapshot = cur
 
+                    # Contagem anterior de soluções aceitas por sólido para distinguir
+                    # novos mínimos inéditos de duplicatas isométricas descartadas
+                    prev_counts: Dict[str, int] = {}
+                    try:
+                        prev_cat = self.catalog.get_catalog()
+                        prev_counts = {
+                            item["id"]: int(item.get("global_count", 0))
+                            for item in prev_cat.get("solids", [])
+                        }
+                    except Exception:
+                        prev_counts = {}
+
                     # Invalida cache em RAM imediatamente para refletir a alteração
                     self.catalog.invalidate()
 
-                    new_solids = set()
+                    touched_solids = set()
                     for p_str in added:
                         p = Path(p_str).resolve()
                         try:
@@ -470,17 +488,82 @@ class SolidosLiveWatcher:
                             continue
                         if len(rel.parts) >= 4 and rel.parts[1] in GLOBAL_DIR_NAMES and "com_autointersecao" not in rel.parts:
                             sid = rel.parts[0]
-                            new_solids.add(sid)
+                            touched_solids.add(sid)
                             if p.name.endswith("_pythonscad.py") and (len(rel.parts) == 4 or rel.parts[3] in NO_INTERSECTION_SUBDIR_NAMES):
                                 sol_id = p.stem.replace("_pythonscad", "")
                                 self.renderer.enqueue_prewarm(sid, sol_id, p, preset="iso")
 
+                    accepted_new_solids: List[str] = []
+                    discarded_solids: List[str] = []
+                    try:
+                        new_cat = self.catalog.get_catalog()
+                        new_counts = {
+                            item["id"]: int(item.get("global_count", 0))
+                            for item in new_cat.get("solids", [])
+                        }
+                        for sid in sorted(touched_solids):
+                            if new_counts.get(sid, 0) > prev_counts.get(sid, 0):
+                                accepted_new_solids.append(sid)
+                            else:
+                                discarded_solids.append(sid)
+                    except Exception:
+                        accepted_new_solids = sorted(touched_solids)
+
                     self.broadcast("catalog_updated", {
-                        "solids": sorted(new_solids),
+                        "solids": accepted_new_solids,
+                        "discarded_solids": discarded_solids,
                         "timestamp": datetime.now().isoformat(timespec="seconds"),
                     })
             except Exception:
                 pass
+
+
+class RemoteAtlasPoller:
+    """
+    Verifica periodicamente o Atlas público (GitHub Pages) para trazer automaticamente
+    novos mínimos globais descobertos por outros membros da equipe (em outras máquinas)
+    para o servidor local em tempo real (sem exigir ação manual).
+    """
+
+    def __init__(self, poll_interval: float = 45.0):
+        self.poll_interval = float(poll_interval)
+        self._stop = threading.Event()
+        self._last_remote_sig: Optional[str] = None
+
+    def start(self):
+        threading.Thread(target=self._loop, daemon=True, name="remote-atlas-poller").start()
+
+    def stop(self):
+        self._stop.set()
+
+    def _check_once(self) -> int:
+        cfg = load_github_config()
+        if not cfg or not cfg.get("owner") or not cfg.get("repo"):
+            return 0
+        remote_cat = _fetch_pages_json_file(cfg, "data/catalog.json")
+        if not isinstance(remote_cat, dict):
+            return 0
+        summary = remote_cat.get("summary") or {}
+        sig = f"{remote_cat.get('generated_at', '')}|{summary.get('total_global_solutions', 0)}"
+        if sig == self._last_remote_sig:
+            return 0
+        self._last_remote_sig = sig
+        ok, msg, added = pull_new_minima_from_github(rebuild_docs=False)
+        if ok and added > 0:
+            print(f"[Atlas Remoto -> Local] ✓ {msg}", flush=True)
+        return added
+
+    def _loop(self):
+        # Primeira verificação suave 4s após subir o servidor
+        if self._stop.wait(4.0):
+            return
+        while not self._stop.is_set():
+            try:
+                self._check_once()
+            except Exception:
+                pass
+            if self._stop.wait(self.poll_interval):
+                break
 
 
 class StaticFileCache:
@@ -654,7 +737,7 @@ class AtlasRequestHandler(BaseHTTPRequestHandler):
                     "python_version": sys.version.split()[0],
                     "render_engine": self.srv.renderer.engine_name,
                     "pythonscad_available": self.srv.renderer.available,
-                    "github_configured": bool(gh and gh.get("token")),
+                    "github_configured": has_remote_publish_credentials(gh),
                     "github_repo": f"{gh['owner']}/{gh['repo']}" if gh else None,
                     "official_files": self.srv.catalog.base.get_official_files_status(),
                     "camera_presets": list(CAMERA_PRESETS.keys()),
@@ -803,6 +886,18 @@ class AtlasRequestHandler(BaseHTTPRequestHandler):
                 self._send_json({"ok": ok, "message": msg, "count": count}, HTTPStatus.OK if ok else HTTPStatus.BAD_REQUEST)
                 return
 
+            if path == "/api/pull-github":
+                ok, msg, count = pull_new_minima_from_github(rebuild_docs=False)
+                if count > 0:
+                    self.srv.catalog.invalidate()
+                    self.srv.watcher.broadcast("catalog_updated", {
+                        "solids": [],
+                        "pulled_count": count,
+                        "timestamp": datetime.now().isoformat(timespec="seconds"),
+                    })
+                self._send_json({"ok": ok, "message": msg, "count": count}, HTTPStatus.OK if ok else HTTPStatus.BAD_REQUEST)
+                return
+
             self._send_json({"error": "Não encontrado."}, HTTPStatus.NOT_FOUND)
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, TimeoutError):
             pass
@@ -855,7 +950,10 @@ def run_server(host: str = "127.0.0.1", port: int = 8765, open_browser: bool = F
     catalog = VerifiedCatalogService(PROJECT_ROOT)
     renderer = PythonSCADRenderer()
     watcher = SolidosLiveWatcher(catalog, renderer, poll_interval=3.0)
+    remote_poller = RemoteAtlasPoller(poll_interval=45.0)
     watcher.start()
+    if os.environ.get("ATLAS_NO_REMOTE_POLL") != "1":
+        remote_poller.start()
     catalog.warm_startup_async(renderer)
 
     httpd = AtlasHTTPServer((host, port), AtlasRequestHandler, catalog, renderer, watcher)
@@ -877,6 +975,7 @@ def run_server(host: str = "127.0.0.1", port: int = 8765, open_browser: bool = F
     except KeyboardInterrupt:
         pass
     finally:
+        remote_poller.stop()
         watcher.stop()
         httpd.server_close()
 

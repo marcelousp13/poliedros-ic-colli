@@ -81,6 +81,7 @@ class AutomaticResultWatcher:
         self.debounce_seconds = debounce_seconds
         self.only_solidos = only_solidos
         self._stop_evt = threading.Event()
+        self._sync_lock = threading.Lock()
         self._thread: threading.Thread | None = None
 
     def start(self):
@@ -90,12 +91,13 @@ class AutomaticResultWatcher:
     def stop_and_flush(self):
         self._stop_evt.set()
         if self._thread:
-            self._thread.join(timeout=3.0)
-        # Sincronização final garantida antes de encerrar
-        ok, msg, count = sync_global_solutions_to_github(only_solidos=self.only_solidos)
-        if count > 0:
-            prefix = "✓" if ok else "✗"
-            print(f"\n[Atlas Auto-Sync] {prefix} {count} arquivo(s) processado(s) — {msg}", flush=True)
+            self._thread.join(timeout=30.0)
+        # Sincronização final garantida antes de encerrar (sem corrida com _loop)
+        with self._sync_lock:
+            ok, msg, count = sync_global_solutions_to_github(only_solidos=self.only_solidos)
+            if count > 0:
+                prefix = "✓" if ok else "✗"
+                print(f"\n[Atlas Auto-Sync] {prefix} {count} arquivo(s) processado(s) — {msg}", flush=True)
 
     def _loop(self):
         last_snap = _snapshot_global_files(self.solidos_dir)
@@ -111,7 +113,8 @@ class AutomaticResultWatcher:
             if pending_since is not None and (time.time() - pending_since) >= self.debounce_seconds:
                 pending_since = None
                 try:
-                    ok, msg, count = sync_global_solutions_to_github(only_solidos=self.only_solidos)
+                    with self._sync_lock:
+                        ok, msg, count = sync_global_solutions_to_github(only_solidos=self.only_solidos)
                     if count > 0:
                         prefix = "✓" if ok else "✗"
                         print(f"\n[Atlas Auto-Sync] {prefix} {msg} ({count} arq.)", flush=True)

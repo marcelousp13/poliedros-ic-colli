@@ -11,6 +11,7 @@ on:
       - "topologia/**"
       - "verificadores/**"
       - "web/**"
+      - "requirements.txt"
       - ".github/workflows/publicar-atlas.yml"
   workflow_dispatch:
 
@@ -41,11 +42,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y openscad xvfb
           python -m pip install --upgrade pip
-          pip install numpy scipy networkx pillow matplotlib
+          pip install -r requirements.txt
 
       - name: Validar soluções oficiais, deduplicar por isomorfismo e construir Atlas estático
         run: |
-          python web/construir_site_estatico.py --output docs
+          xvfb-run -a python web/construir_site_estatico.py --output docs
 
       - name: Enviar artefato do GitHub Pages
         uses: actions/upload-pages-artifact@v3

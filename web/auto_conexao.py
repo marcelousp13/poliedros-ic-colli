@@ -27,8 +27,15 @@ def _configurar_primeira_vez_worker(cfg: dict) -> Optional[dict]:
     """
     from github_sync import CONFIG_PATH, load_github_config, test_worker_connection
 
-    # Só pergunta em sessões interativas
-    if not sys.stdin or not sys.stdin.isatty():
+    # Só pergunta em sessões interativas (terminal TTY, Spyder ou IPython/Jupyter)
+    if os.environ.get("ATLAS_NON_INTERACTIVE") == "1":
+        return cfg
+    is_interactive = bool(
+        (sys.stdin and sys.stdin.isatty())
+        or "spyder_kernels" in sys.modules
+        or "ipykernel" in sys.modules
+    )
+    if not is_interactive:
         return cfg
 
     print("\n" + "-" * 72)
@@ -49,33 +56,60 @@ def _configurar_primeira_vez_worker(cfg: dict) -> Optional[dict]:
     autor_padrao = cfg.get("autor") or os.environ.get("USERNAME") or "Pesquisador"
     try:
         autor = input(f"  Seu nome [{autor_padrao}]: ").strip() or autor_padrao
-        team_key = input("  Cole a chave da equipe (TEAM_KEY): ").strip()
     except (EOFError, KeyboardInterrupt):
         return cfg
 
-    if not team_key:
-        print("  [Atlas] Chave não informada; continuando em modo local.\n")
-        return cfg
-
-    existente = {}
-    if CONFIG_PATH.exists():
+    for tentativa in range(1, 4):
         try:
-            existente = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-        except Exception:
+            team_key = input("  Cole a chave da equipe (TEAM_KEY): ").strip()
+        except (EOFError, KeyboardInterrupt):
+            return cfg
+
+        if not team_key:
+            print("  [Atlas] Chave não informada; continuando em modo local.\n")
+            return cfg
+
+        candidato = dict(cfg)
+        candidato["autor"] = autor
+        candidato["team_key"] = team_key
+        ok, msg = test_worker_connection(candidato)
+        if ok:
             existente = {}
+            if CONFIG_PATH.exists():
+                try:
+                    existente = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+                except Exception:
+                    existente = {}
+            existente["autor"] = autor
+            existente["team_key"] = team_key
+            CONFIG_PATH.write_text(json.dumps(existente, indent=2, ensure_ascii=False), encoding="utf-8")
+            novo_cfg = load_github_config() or candidato
+            print(f"  [Atlas] ✓ Conectado! {msg} (autor: {autor})\n")
+            return novo_cfg
 
-    existente["autor"] = autor
-    existente["team_key"] = team_key
-    CONFIG_PATH.write_text(json.dumps(existente, indent=2, ensure_ascii=False), encoding="utf-8")
+        if "TEAM_KEY" in msg or "401" in msg:
+            print(f"  [Atlas] ✗ {msg} (tentativa {tentativa}/3)")
+            if tentativa < 3:
+                continue
+            print("  [Atlas] Chave inválida; continuando em modo local nesta execução.\n")
+            return cfg
 
-    novo_cfg = load_github_config() or cfg
-    ok, msg = test_worker_connection(novo_cfg)
-    if ok:
-        print(f"  [Atlas] ✓ Conectado! {msg} (autor: {autor})\n")
-    else:
+        # Caso sem internet no momento, salva localmente para tentar quando voltar online
+        existente = {}
+        if CONFIG_PATH.exists():
+            try:
+                existente = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+            except Exception:
+                existente = {}
+        existente["autor"] = autor
+        existente["team_key"] = team_key
+        CONFIG_PATH.write_text(json.dumps(existente, indent=2, ensure_ascii=False), encoding="utf-8")
+        novo_cfg = load_github_config() or candidato
         print(f"  [Atlas] Aviso ao testar Worker: {msg}")
         print("  [Atlas] A chave foi salva em web/config_github.json e o envio será tentado automaticamente.\n")
-    return novo_cfg
+        return novo_cfg
+
+    return cfg
 
 
 def iniciar_sincronizacao_automatica():

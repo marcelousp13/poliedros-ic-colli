@@ -16,6 +16,7 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import webbrowser
 from pathlib import Path
@@ -194,12 +195,35 @@ def test_worker_connection(cfg: Dict[str, str]) -> Tuple[bool, str]:
         headers={"User-Agent": "IC-com-Colli-Atlas-Sync/1.0"},
         timeout=15,
     )
-    if status == 200 and isinstance(data, dict) and data.get("ok"):
-        if not data.get("configured", True):
-            return False, "Worker online, mas faltam os Secrets GITHUB_TOKEN ou TEAM_KEY no Cloudflare."
-        return True, f"Worker online ({data.get('repo', cfg['owner'] + '/' + cfg['repo'])})."
-    msg = data.get("message", str(data)) if isinstance(data, dict) else str(data)
-    return False, f"Worker inacessível ({status}): {msg}"
+    if not (status == 200 and isinstance(data, dict) and data.get("ok")):
+        msg = data.get("message", str(data)) if isinstance(data, dict) else str(data)
+        return False, f"Worker inacessível ({status}): {msg}"
+    if not data.get("configured", True):
+        return False, "Worker online, mas faltam os Secrets GITHUB_TOKEN ou TEAM_KEY no Cloudflare."
+
+    repo_lbl = data.get("repo", cfg["owner"] + "/" + cfg["repo"])
+    team_key = (cfg.get("team_key") or "").strip()
+    if team_key:
+        # Valida a chave da equipe sem gravar nada no GitHub:
+        # /submit verifica X-Team-Key (401 se inválida) antes de exigir files (400 se chave válida).
+        st_k, data_k = _http_json_request(
+            "POST",
+            f"{worker_url}/submit",
+            headers={
+                "X-Team-Key": team_key,
+                "User-Agent": "IC-com-Colli-Atlas-Sync/1.0",
+            },
+            payload={"files": []},
+            timeout=15,
+        )
+        if st_k == 401:
+            return False, "Chave da equipe (TEAM_KEY) inválida! Confira a senha com a equipe."
+        if st_k == 400:
+            return True, f"Worker online e chave da equipe validada ({repo_lbl})."
+        msg_k = data_k.get("message", str(data_k)) if isinstance(data_k, dict) else str(data_k)
+        return False, f"Falha ao validar chave no Worker ({st_k}): {msg_k}"
+
+    return True, f"Worker online ({repo_lbl})."
 
 
 def push_files_via_worker(
@@ -326,9 +350,10 @@ def push_files_atomic_api(
         if st_ref in (404, 409):
             # Cria o primeiro arquivo via Contents API para inicializar o branch
             first_path, first_bytes = files[0]
+            first_path_enc = urllib.parse.quote(first_path, safe="/")
             st_init, init_data = _gh_request(
                 "PUT",
-                f"{api_base}/contents/{first_path}",
+                f"{api_base}/contents/{first_path_enc}",
                 token,
                 {
                     "message": commit_message,
@@ -497,6 +522,31 @@ def save_sent_registry(reg: Dict[str, str]):
     SENT_STATE_PATH.write_text(json.dumps(reg, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
+def _fetch_pages_json_file(cfg: Dict[str, str], rel_posix: str) -> Optional[Any]:
+    """
+    Busca um arquivo JSON diretamente do site público publicado no GitHub Pages
+    (https://<owner>.github.io/<repo>/<rel_posix>), que é sempre a versão mais
+    recente construída pelo GitHub Actions — sem exigir token e sem consumir
+    rate limit da API do GitHub.
+    """
+    if not cfg or not cfg.get("owner") or not cfg.get("repo"):
+        return None
+    rel_enc = urllib.parse.quote(rel_posix.lstrip("/"), safe="/")
+    pages_url = f"https://{cfg['owner']}.github.io/{cfg['repo']}/{rel_enc}?t={int(time.time())}"
+    st, data = _http_json_request(
+        "GET",
+        pages_url,
+        headers={
+            "User-Agent": "IC-com-Colli-Atlas-Sync/1.0",
+            "Cache-Control": "no-cache",
+        },
+        timeout=20,
+    )
+    if st == 200:
+        return data
+    return None
+
+
 def _fetch_remote_json_file(cfg: Dict[str, str], rel_posix: str) -> Optional[Any]:
     """
     Busca e decodifica um arquivo JSON do repositório GitHub remoto (se existir).
@@ -505,10 +555,11 @@ def _fetch_remote_json_file(cfg: Dict[str, str], rel_posix: str) -> Optional[Any
     """
     if not cfg or not cfg.get("owner") or not cfg.get("repo"):
         return None
+    rel_enc = urllib.parse.quote(rel_posix.lstrip("/"), safe="/")
     if not cfg.get("token"):
         raw_url = (
             f"https://raw.githubusercontent.com/{cfg['owner']}/{cfg['repo']}/"
-            f"{cfg['branch']}/{rel_posix}?t={int(time.time())}"
+            f"{cfg['branch']}/{rel_enc}?t={int(time.time())}"
         )
         st, data = _http_json_request(
             "GET",
@@ -520,7 +571,7 @@ def _fetch_remote_json_file(cfg: Dict[str, str], rel_posix: str) -> Optional[Any
             return data
         return None
 
-    url = f"https://api.github.com/repos/{cfg['owner']}/{cfg['repo']}/contents/{rel_posix}?ref={cfg['branch']}"
+    url = f"https://api.github.com/repos/{cfg['owner']}/{cfg['repo']}/contents/{rel_enc}?ref={cfg['branch']}"
     status, data = _gh_request("GET", url, cfg.get("token", ""))
     if status != 200 or not isinstance(data, dict):
         return None
@@ -542,8 +593,11 @@ def _get_existing_site_solutions_for_solid(
     """
     Carrega os mínimos que JÁ existem no site para `solid_id`, combinando:
       1. Base local do site em docs/data/solids/<slug>.json
-      2. Base remota publicada no GitHub em docs/data/solids/<slug>.json (e solidos/<solid_id>/...)
-    Garante que o Passo 2 e o Passo 3 enxerguem tanto o site local quanto o site remoto no GitHub.
+      2. Site público ao vivo no GitHub Pages (https://<owner>.github.io/<repo>/data/solids/<slug>.json)
+      3. Base estática do repositório em docs/data/solids/<slug>.json (fallback)
+      4. JSONs recém-enviados em solidos/<solid_id>/minimos_globais/.../sem_autointersecao/ no GitHub
+         (funciona TANTO com token quanto em modo Cloudflare Worker, para que uma máquina enxergue
+         imediatamente mínimos enviados segundos atrás por outra máquina antes mesmo do deploy!)
     """
     from construir_site_estatico import _compute_geom_hash, safe_slug
     from verificadores.isomorfismo import construir_matriz_distancias
@@ -588,8 +642,17 @@ def _get_existing_site_solutions_for_solid(
         except Exception:
             pass
 
-    # 2. Site remoto no GitHub (docs/data/solids/<slug>.json)
+    # 2. Site público ao vivo (GitHub Pages) + fallback no repo + solidos/ recém-enviados no GitHub
     if cfg and cfg.get("owner") and cfg.get("repo"):
+        # 2a. GitHub Pages ao vivo (sempre atualizado após o GitHub Actions!)
+        pages_payload = _fetch_pages_json_file(cfg, f"data/solids/{slug}.json")
+        if isinstance(pages_payload, dict):
+            raw_pages = pages_payload.get("global_solutions") or (
+                (pages_payload.get("convex_solutions") or []) + (pages_payload.get("nonconvex_solutions") or [])
+            )
+            _absorb_solution_list(raw_pages)
+
+        # 2b. Fallback: docs/data/solids/<slug>.json no branch principal do repositório
         remote_payload = _fetch_remote_json_file(cfg, f"docs/data/solids/{slug}.json")
         if isinstance(remote_payload, dict):
             raw_remote = remote_payload.get("global_solutions") or (
@@ -597,22 +660,36 @@ def _get_existing_site_solutions_for_solid(
             )
             _absorb_solution_list(raw_remote)
 
-        # Também consulta eventuais JSONs recém-enviados em solidos/<solid_id>/minimos_globais/ no GitHub
-        # (somente quando há token GitHub local, para não esgotar rate limit da API pública)
-        if cfg.get("token"):
-            for cat_sub in ("convexos", "nao_convexos"):
-                dir_url = (
-                    f"https://api.github.com/repos/{cfg['owner']}/{cfg['repo']}/contents/"
-                    f"solidos/{solid_id}/minimos_globais/{cat_sub}/sem_autointersecao?ref={cfg['branch']}"
-                )
-                st, items = _gh_request("GET", dir_url, cfg.get("token", ""))
-                if st == 200 and isinstance(items, list):
-                    for item in items:
-                        if isinstance(item, dict) and str(item.get("name", "")).endswith(".json"):
-                            r_sol = _fetch_remote_json_file(cfg, item["path"])
-                            if isinstance(r_sol, dict) and r_sol.get("vc"):
-                                r_sol["solution_id"] = Path(item["name"]).stem
-                                _absorb_solution_list([r_sol])
+        # 2c. Consulta JSONs em solidos/<solid_id>/minimos_globais/{convexos,nao_convexos}/sem_autointersecao/
+        # no GitHub (enxerga commits enviados segundos atrás por outra máquina antes do GitHub Actions terminar!)
+        sid_enc = urllib.parse.quote(solid_id, safe="")
+        tok = cfg.get("token", "")
+        for cat_sub in ("convexos", "nao_convexos"):
+            dir_url = (
+                f"https://api.github.com/repos/{cfg['owner']}/{cfg['repo']}/contents/"
+                f"solidos/{sid_enc}/minimos_globais/{cat_sub}/sem_autointersecao?ref={cfg['branch']}"
+            )
+            st, items = _gh_request("GET", dir_url, tok)
+            if st == 200 and isinstance(items, list):
+                for item in items:
+                    if not (isinstance(item, dict) and str(item.get("name", "")).endswith(".json")):
+                        continue
+                    r_sol = None
+                    dl_url = item.get("download_url")
+                    if dl_url and not tok:
+                        st_dl, d_dl = _http_json_request(
+                            "GET",
+                            f"{dl_url}?t={int(time.time())}",
+                            headers={"User-Agent": "IC-com-Colli-Atlas-Sync/1.0"},
+                            timeout=20,
+                        )
+                        if st_dl == 200 and isinstance(d_dl, dict):
+                            r_sol = d_dl
+                    else:
+                        r_sol = _fetch_remote_json_file(cfg, item["path"])
+                    if isinstance(r_sol, dict) and r_sol.get("vc"):
+                        r_sol["solution_id"] = Path(item["name"]).stem
+                        _absorb_solution_list([r_sol])
 
     return site_solutions
 
@@ -654,6 +731,7 @@ def sync_global_solutions_to_github(
             pass
 
     catalog = CatalogService(PROJECT_ROOT)
+    solids_meta_map = {e["id"]: e for e in catalog.list_all_solids_from_faces_txt()}
     validador = ValidadorCientifico()
     sent_reg = {} if force_all else load_sent_registry()
     reg_dirty = False
@@ -697,12 +775,13 @@ def sync_global_solutions_to_github(
         if not pending_records:
             continue
 
-        # Passo 2: Carrega os mínimos que JÁ existem no site (local + GitHub) para este sólido
+        # Passo 2: Carrega os mínimos que JÁ existem no site (local + GitHub Pages + GitHub solidos/)
         site_solutions = _get_existing_site_solutions_for_solid(cfg, sid, validador)
         existing_by_id = {s["solution_id"]: s for s in site_solutions}
+        faces_raw = (solids_meta_map.get(sid) or {}).get("faces_raw") or []
 
         for rec, pending_paths in pending_records:
-            analyzed = catalog._analyze_global_record(sid, [], rec)
+            analyzed = catalog._analyze_global_record(sid, faces_raw, rec)
             if analyzed is None:
                 continue
 
@@ -838,17 +917,20 @@ def sync_global_solutions_to_github(
     return False, info, 0
 
 
-def pull_new_minima_from_github() -> Tuple[bool, str, int]:
+def pull_new_minima_from_github(rebuild_docs: bool = True) -> Tuple[bool, str, int]:
     """
-    Puxa do repositório GitHub apenas os NOVOS mínimos encontrados pelos outros membros
-    da equipe (Marcelo, Thomas ou Prof. Colli), aplicando o protocolo de 4 passos:
-      1. Novo mínimo detectado no GitHub remoto
-      2. Verifica se já existe mínimo para esse sólido no site local
+    Puxa do site público publicado (GitHub Pages) / repositório GitHub apenas os NOVOS
+    mínimos encontrados pelos outros membros da equipe (Marcelo, Thomas ou Prof. Colli),
+    aplicando o protocolo de 4 passos:
+      1. Novo mínimo detectado no Atlas remoto
+      2. Verifica se já existe mínimo para esse sólido localmente (docs/ + solidos/)
       3. Verifica se é igual (isomorfismo métrico)
       4. Se for igual, descarta; se for novo e cumprir todas as exigências, adiciona localmente.
     """
+    import re
     from construir_site_estatico import _load_existing_site_solutions, build_static_atlas
     from exportadores.pythonscad_exportador import ExportadorPythonSCAD
+    from geometry_analyzer import CatalogService
     from persistencia.gerenciador_solucoes import GerenciadorSolucoes
     from scad_renderer import CAMERA_PRESETS
     from validador_cientifico import ValidadorCientifico
@@ -860,14 +942,22 @@ def pull_new_minima_from_github() -> Tuple[bool, str, int]:
         return False, "GitHub ainda não configurado (execute web\\configurar_github.bat).", 0
 
     validador = ValidadorCientifico()
+    catalog_svc = CatalogService(PROJECT_ROOT)
+    solids_meta_map = {e["id"]: e for e in catalog_svc.list_all_solids_from_faces_txt()}
     gerenciador = GerenciadorSolucoes(pasta_base=str(PROJECT_ROOT / "solidos"))
     exportador = ExportadorPythonSCAD(fator_escala=20.0, pasta_base=str(PROJECT_ROOT / "solidos"))
 
-    remote_catalog = _fetch_remote_json_file(cfg, "docs/data/catalog.json")
+    # Prioriza o site público ao vivo (GitHub Pages), com fallback para docs/ no branch
+    remote_catalog = _fetch_pages_json_file(cfg, "data/catalog.json")
+    from_pages = isinstance(remote_catalog, dict) and isinstance(remote_catalog.get("solids"), list)
+    if not from_pages:
+        remote_catalog = _fetch_remote_json_file(cfg, "docs/data/catalog.json")
     if not isinstance(remote_catalog, dict) or not isinstance(remote_catalog.get("solids"), list):
-        return False, "Não foi possível ler docs/data/catalog.json do repositório remoto.", 0
+        return False, "Não foi possível ler data/catalog.json do Atlas remoto.", 0
 
     local_site_map = _load_existing_site_solutions(PROJECT_ROOT / "docs" / "data" / "solids", validador)
+    sent_reg = load_sent_registry()
+    reg_dirty = False
     added_count = 0
 
     for item in remote_catalog["solids"]:
@@ -878,11 +968,36 @@ def pull_new_minima_from_github() -> Tuple[bool, str, int]:
         if not sid:
             continue
 
-        remote_detail = _fetch_remote_json_file(cfg, f"docs/data/solids/{slug}.json")
+        # Base local combinada: docs/data/solids/ + solidos/<sid>/minimos_globais/
+        site_solutions = list(local_site_map.get(sid, []))
+        local_sdir = PROJECT_ROOT / "solidos" / sid
+        if local_sdir.is_dir():
+            faces_raw = (solids_meta_map.get(sid) or {}).get("faces_raw") or []
+            for rec in catalog_svc._collect_global_records(local_sdir):
+                analyzed = catalog_svc._analyze_global_record(sid, faces_raw, rec)
+                if analyzed is None or not analyzed.get("vertices"):
+                    continue
+                iso = validador.verificar_igualdade_isometrica(analyzed["vertices"], site_solutions)
+                if not iso["is_equal"]:
+                    analyzed["already_on_site"] = True
+                    analyzed["_dist_matrix"] = construir_matriz_distancias(analyzed["vertices"])
+                    site_solutions.append(analyzed)
+
+        # Atalho rápido: se o remoto tem a mesma contagem e não há razão para baixar, ainda verificamos
+        # se total remoto > local ou se algum geom_hash diferir
+        local_hashes = {s.get("geom_hash") for s in site_solutions if s.get("geom_hash")}
+        remote_compact = item.get("global_solutions") or []
+        if remote_compact and all(rc.get("geom_hash") in local_hashes for rc in remote_compact if rc.get("geom_hash")):
+            continue
+
+        remote_detail = (
+            _fetch_pages_json_file(cfg, f"data/solids/{slug}.json")
+            if from_pages
+            else None
+        ) or _fetch_remote_json_file(cfg, f"docs/data/solids/{slug}.json")
         if not isinstance(remote_detail, dict):
             continue
 
-        site_solutions = list(local_site_map.get(sid, []))
         remote_sols = remote_detail.get("global_solutions") or (
             (remote_detail.get("convex_solutions") or []) + (remote_detail.get("nonconvex_solutions") or [])
         )
@@ -895,7 +1010,7 @@ def pull_new_minima_from_github() -> Tuple[bool, str, int]:
             if not avaliacao["accepted"]:
                 continue
 
-            # Novo mínimo inédito vindo do GitHub! Salva em solidos/<sid>/minimos_globais/...
+            # Novo mínimo inédito vindo do Atlas remoto! Salva em solidos/<sid>/minimos_globais/...
             fval = float(avaliacao["fval_recomputed"])
             is_conv = bool(avaliacao["is_convex"])
             faces_or = avaliacao["faces_oriented"]
@@ -903,10 +1018,13 @@ def pull_new_minima_from_github() -> Tuple[bool, str, int]:
             angs = rsol.get("angulos_salvos") or VerificadorGeometrico.calcular_angulos_diedrais(verts, faces_or).tolist()
             autovals = rsol.get("autovalores") or []
             sol_id = str(rsol.get("solution_id") or "solucao_global_github")
+            m_ts = re.match(r"^(.*)_(\d{8}_\d{6})$", sol_id)
+            nome_base = m_ts.group(1) if m_ts else sol_id
+            ts_val = m_ts.group(2) if m_ts else None
 
             gerenciador.verificar_duplicata_e_registrar(sid, verts, dists, angs, fval)
-            gerenciador.salvar_arquivos_solucao(
-                nome_solucao=sol_id,
+            j_path, t_path = gerenciador.salvar_arquivos_solucao(
+                nome_solucao=nome_base,
                 tipo="global",
                 nome_solido=sid,
                 vc=verts,
@@ -918,28 +1036,42 @@ def pull_new_minima_from_github() -> Tuple[bool, str, int]:
                 tem_autointersecao=False,
                 info_convexidade=avaliacao["convexity"],
                 info_autointersecao=avaliacao["self_intersection"],
+                timestamp=ts_val,
             )
-            exportador.exportar_se_minimo_global(
+            s_path = exportador.exportar_se_minimo_global(
                 nome_solido=sid,
-                nome_solucao=sol_id,
+                nome_solucao=nome_base,
                 tipo_solucao="global",
                 vertices=verts,
                 faces=faces_or,
                 fval=fval,
                 convexo=is_conv,
                 tem_autointersecao=False,
+                timestamp=ts_val,
             )
+            # Marca arquivos puxados como já presentes no remoto para o vigia não reenviar
+            for fp_str in (j_path, t_path, s_path):
+                if fp_str and Path(fp_str).is_file():
+                    fp = Path(fp_str)
+                    rel_posix = fp.relative_to(PROJECT_ROOT).as_posix()
+                    sent_reg[rel_posix] = f"{fp.stat().st_size}:{int(fp.stat().st_mtime)}"
+                    reg_dirty = True
+
             rsol_copy = dict(rsol)
             rsol_copy["already_on_site"] = True
             rsol_copy["_dist_matrix"] = construir_matriz_distancias(verts)
             site_solutions.append(rsol_copy)
             added_count += 1
-            print(f"  [GitHub Pull · NOVO MÍNIMO] {sid}/{sol_id} adicionado localmente (-> {avaliacao['target_tab']}).")
+            print(f"  [Atlas Pull · NOVO MÍNIMO] {sid}/{sol_id} sincronizado localmente (-> {avaliacao['target_tab']}).")
+
+    if reg_dirty:
+        save_sent_registry(sent_reg)
 
     if added_count > 0:
-        build_static_atlas(PROJECT_ROOT / "docs", presets=list(CAMERA_PRESETS.keys()))
-        return True, f"{added_count} novo(s) mínimo(s) puxado(s) do GitHub e adicionado(s) ao site.", added_count
-    return True, "Site local já contém todos os mínimos publicados no GitHub.", 0
+        if rebuild_docs:
+            build_static_atlas(PROJECT_ROOT / "docs", presets=list(CAMERA_PRESETS.keys()))
+        return True, f"{added_count} novo(s) mínimo(s) sincronizado(s) do Atlas remoto.", added_count
+    return True, "Base local já contém todos os mínimos publicados no Atlas.", 0
 
 
 def collect_project_files_for_bootstrap() -> List[Tuple[str, bytes]]:

@@ -15,6 +15,7 @@ import os
 import ssl
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import List, Tuple
@@ -96,21 +97,37 @@ def enviar_solidos_colab(pasta_solidos: str = "solidos", branch: str = "main"):
         if not gdir.is_dir():
             continue
 
-        # Carrega mínimos já existentes no site (GitHub) para este sólido
+        # Carrega mínimos já existentes no site (GitHub Pages ao vivo + repo) para este sólido
         site_solutions = []
         if validador is not None and construir_matriz_distancias is not None:
-            st_rem, rem_data = _req("GET", f"{api}/contents/docs/data/solids/{sid}.json?ref={branch}", token)
-            if st_rem == 200 and isinstance(rem_data, dict) and rem_data.get("content"):
-                try:
-                    rem_payload = json.loads(base64.b64decode(rem_data["content"]).decode("utf-8"))
-                    for rsol in (rem_payload.get("global_solutions") or []):
-                        if rsol.get("vertices"):
-                            rc = dict(rsol)
-                            rc["already_on_site"] = True
-                            rc["_dist_matrix"] = construir_matriz_distancias(rc["vertices"])
-                            site_solutions.append(rc)
-                except Exception:
-                    pass
+            owner_gh, repo_gh = repo_full.split("/", 1)
+            sid_enc = urllib.parse.quote(sid, safe="")
+            rem_payload = None
+            try:
+                pages_req = urllib.request.Request(
+                    f"https://{owner_gh}.github.io/{repo_gh}/data/solids/{sid_enc}.json?t={int(time.time())}",
+                    headers={"User-Agent": "IC-com-Colli-Colab-Sync/1.0"},
+                )
+                with urllib.request.urlopen(pages_req, timeout=20, context=_SSL_CTX) as pr:
+                    rem_payload = json.loads(pr.read().decode("utf-8", errors="replace"))
+            except Exception:
+                rem_payload = None
+
+            if not isinstance(rem_payload, dict):
+                st_rem, rem_data = _req("GET", f"{api}/contents/docs/data/solids/{sid_enc}.json?ref={branch}", token)
+                if st_rem == 200 and isinstance(rem_data, dict) and rem_data.get("content"):
+                    try:
+                        rem_payload = json.loads(base64.b64decode(rem_data["content"]).decode("utf-8"))
+                    except Exception:
+                        rem_payload = None
+
+            if isinstance(rem_payload, dict):
+                for rsol in (rem_payload.get("global_solutions") or []):
+                    if rsol.get("vertices"):
+                        rc = dict(rsol)
+                        rc["already_on_site"] = True
+                        rc["_dist_matrix"] = construir_matriz_distancias(rc["vertices"])
+                        site_solutions.append(rc)
 
         for sub_name in ("convexos", "nao_convexos"):
             sdir = gdir / sub_name / "sem_autointersecao"

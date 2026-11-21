@@ -139,7 +139,7 @@
     }
     if (!data) {
       try {
-        data = await fetchJson("./data/catalog.json");
+        data = await fetchJson(`./data/catalog.json?t=${Date.now()}`);
         state.mode = "static";
       } catch (err) {
         if (!silent) showToast(`Erro ao carregar catálogo: ${esc(err.message)}`);
@@ -211,9 +211,14 @@
     es.addEventListener("catalog_updated", (e) => {
       const info = JSON.parse(e.data || "{}");
       const solids = info.solids || [];
+      const discarded = info.discarded_solids || [];
       loadCatalog(true).then(() => {
         if (solids.length > 0) {
           showToast(`Novo resultado absorvido: <strong>${esc(solids.join(", "))}</strong>`, "success", 4200);
+        } else if (discarded.length > 0) {
+          showToast(`Duplicata isométrica descartada: <strong>${esc(discarded.join(", "))}</strong> (já existe no site)`, "info", 3800);
+        } else if (info.pulled_count > 0) {
+          showToast(`Atlas atualizado com <strong>${info.pulled_count}</strong> novo(s) mínimo(s) da equipe`, "success", 4200);
         }
       });
     });
@@ -226,6 +231,38 @@
     };
     window.addEventListener("pagehide", closeCleanly, { once: true });
     window.addEventListener("beforeunload", closeCleanly, { once: true });
+  }
+
+  function startStaticAutoRefresh(intervalMs = 30000) {
+    if (state.mode !== "static") return;
+    setInterval(async () => {
+      if (document.visibilityState !== "visible" || !state.catalog) return;
+      try {
+        const fresh = await fetchJson(`./data/catalog.json?t=${Date.now()}`);
+        const prevGen = state.catalog?.generated_at || "";
+        const nextGen = fresh?.generated_at || "";
+        const prevTotal = state.catalog?.summary?.total_global_solutions ?? 0;
+        const nextTotal = fresh?.summary?.total_global_solutions ?? 0;
+        if (nextGen !== prevGen || nextTotal !== prevTotal) {
+          state.catalog = fresh;
+          state.catalogVersion += 1;
+          state.detailCache.clear();
+          const s = fresh.summary || {};
+          $("#badge-resultados").textContent = `${s.solids_with_convex_global ?? 0}`;
+          $("#badge-descobertas").textContent = `${s.total_nonconvex_solutions ?? 0}`;
+          updateStatusPill();
+          if (state.activeTab === "resultados") renderResultados();
+          else renderDescobertas();
+          showToast(
+            `Atlas público atualizado! · <strong>${s.solids_with_convex_global ?? 0}</strong> convexos · <strong>${s.total_nonconvex_solutions ?? 0}</strong> descobertas`,
+            "success",
+            4200
+          );
+        }
+      } catch {
+        // ignora falhas pontuais de rede
+      }
+    }, intervalMs);
   }
 
   // ==========================================================================
@@ -571,7 +608,8 @@
         if (state.mode === "static") {
           const entry = (state.catalog?.solids || []).find((s) => s.id === solidId);
           if (!entry || !entry.detail_url) throw new Error("Dossiê não encontrado.");
-          detail = await fetchJson(entry.detail_url);
+          const sep = entry.detail_url.includes("?") ? "&" : "?";
+          detail = await fetchJson(`${entry.detail_url}${sep}t=${Date.now()}`);
         } else {
           detail = await fetchJson(`/api/solid/${encodeURIComponent(solidId)}`);
         }
@@ -825,12 +863,12 @@
       ${statusLine}
       <div class="sync-steps">
         <div class="sync-step">
-          <div class="sync-step-title">1. Rodar conectado (100% automático)</div>
-          <div>Execute <code>web\\rodar_conectado.bat</code> — roda <code>standbyalone2.py</code> e envia cada novo mínimo global ao GitHub assim que encontrado.</div>
+          <div class="sync-step-title">1. Execução automática em qualquer máquina (Spyder, VS Code ou terminal)</div>
+          <div>Basta rodar <code>standbyalone2.py</code> — o envio automático via Cloudflare Worker já está embutido. Na 1ª vez pede apenas seu nome e a <code>TEAM_KEY</code> da equipe.</div>
         </div>
         <div class="sync-step">
-          <div class="sync-step-title">2. Sincronizar resultados offline</div>
-          <div>Se rodou no Spyder ou terminal comum, execute <code>web\\sincronizar.bat</code> (ou <code>git push</code>).</div>
+          <div class="sync-step-title">2. Deduplicação global entre máquinas (protocolo de 4 passos)</div>
+          <div>Cada novo mínimo é conferido por isomorfismo métrico contra o site público e o GitHub; duplicatas são descartadas e apenas mínimos inéditos disparam o GitHub Actions para todos.</div>
         </div>
         <div class="sync-step">
           <div class="sync-step-title">3. Separação automática por convexidade e autointerseção</div>
@@ -1065,6 +1103,8 @@
     if (state.mode === "local") {
       await loadLocalSystemStatus();
       connectLiveWatcherSSE();
+    } else {
+      startStaticAutoRefresh(30000);
     }
   }
 
