@@ -1,0 +1,64 @@
+name: Publicar Atlas Científico (GitHub Pages)
+
+on:
+  push:
+    branches: ["main", "master"]
+    paths:
+      - "solidos/**"
+      - "docs/**"
+      - "faces.txt"
+      - "dados/**"
+      - "topologia/**"
+      - "verificadores/**"
+      - "web/**"
+      - ".github/workflows/publicar-atlas.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages-atlas"
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Baixar repositório
+        uses: actions/checkout@v4
+
+      - name: Configurar Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Instalar OpenSCAD (renderização headless) e dependências científicas
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y openscad xvfb
+          python -m pip install --upgrade pip
+          pip install numpy scipy networkx pillow matplotlib
+
+      - name: Validar soluções oficiais, deduplicar por isomorfismo e construir Atlas estático
+        run: |
+          python web/construir_site_estatico.py --output docs
+
+      - name: Enviar artefato do GitHub Pages
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs
+
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Publicar no GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
