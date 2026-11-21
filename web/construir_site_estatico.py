@@ -140,13 +140,14 @@ def _load_existing_site_solutions(
                 sol["faces"] = faces
                 sol["verified_official"] = True
 
-            # Evita duplicatas internas caso o json antigo tivesse alguma
-            iso = validador.verificar_igualdade_isometrica(verts, kept_for_solid)
-            if iso["is_equal"]:
-                continue
-
+            # Evita duplicatas estritamente idênticas (mesmo solution_id e mesmo geom_hash),
+            # preservando integralmente recorrências isométricas de execuções/amostras distintas
             sol_copy = dict(sol)
             sol_copy["geom_hash"] = sol_copy.get("geom_hash") or _compute_geom_hash(verts, faces)
+            ex_key = (sol_copy.get("solution_id"), sol_copy["geom_hash"])
+            if any((k.get("solution_id"), k.get("geom_hash")) == ex_key for k in kept_for_solid):
+                continue
+
             sol_copy["already_on_site"] = True
             sol_copy["_dist_matrix"] = construir_matriz_distancias(verts)
             kept_for_solid.append(sol_copy)
@@ -222,6 +223,7 @@ def build_static_atlas(
         "total_global_solutions": 0,
         "total_convex_solutions": 0,
         "total_nonconvex_solutions": 0,
+        "total_unique_geometries": 0,
         "existing_kept": 0,
         "new_solutions_added": 0,
         "duplicates_removed": 0,
@@ -234,9 +236,9 @@ def build_static_atlas(
     catalog_items: List[Dict[str, Any]] = []
     detail_payloads: List[Any] = []
 
-    print(f"[Atlas] Construindo/atualizando site estático em: {output_dir}")
+    print(f"[Atlas] Construindo/atualizando catálogo estático em: {output_dir}")
     print(f"[Atlas] Motor de renderização detectado: {renderer.engine_name}")
-    print("[Atlas] Verificação incremental de 4 passos ativa (puxa apenas NOVOS mínimos válidos)")
+    print("[Atlas] Modo catálogo completo: todos os globais sem autointerseção são preservados (com isometria classificada)")
 
     for entry in solids_base:
         sid = entry["id"]
@@ -274,40 +276,31 @@ def build_static_atlas(
             cand_hash = analyzed.get("geom_hash") or _compute_geom_hash(analyzed["vertices"], analyzed["faces"])
 
             # Se for exatamente o mesmo registro já indexado no site (mesmo ID e mesmo geom_hash),
-            # vincula os caminhos locais e absorve metadados técnicos de execução (se agora disponíveis)
+            # vincula os caminhos locais e atualiza metadados técnicos de execução (se disponíveis)
             if sol_id in existing_by_id and existing_by_id[sol_id].get("geom_hash") == cand_hash:
                 ex = existing_by_id[sol_id]
                 for k in ("scad_path", "json_path", "txt_path"):
                     if analyzed.get(k):
                         ex[k] = analyzed[k]
-                if analyzed.get("execucao") and not ex.get("execucao"):
+                if analyzed.get("execucao"):
                     ex["execucao"] = analyzed["execucao"]
                 continue
 
             # ==================================================================
-            # PROTOCOLO DE 4 PASSOS DO SITE:
-            #   1. Novo mínimo detectado na pasta
-            #   2. Verifica se já existe mínimo para esse sólido no site
-            #   3. Verifica se é igual (isomorfismo métrico)
-            #   4. Se for igual, descarta; se for novo e cumprir todas as exigências, adiciona
+            # VALIDAÇÃO CIENTÍFICA (PRESERVA TODOS OS GLOBAIS SEM AUTOINTERSEÇÃO)
             # ==================================================================
             if not skip_verify:
                 if not entry["has_topology"]:
                     stats["rejected_invalid"] += 1
-                    print(f"  [1-4 · REJEITADO] {sid}/{sol_id}: sólido sem topologia ativa em faces.txt.")
+                    print(f"  [REJEITADO] {sid}/{sol_id}: sólido sem topologia ativa em faces.txt.")
                     continue
 
-                avaliacao = validador.avaliar_novo_minimo_4_passos(sid, analyzed, site_solutions)
+                avaliacao = validador.avaliar_novo_minimo_4_passos(
+                    sid, analyzed, site_solutions, permitir_isometricos=True
+                )
                 if not avaliacao["accepted"]:
-                    if avaliacao["status"] == "descartado_igual":
-                        stats["duplicates_removed"] += 1
-                        print(
-                            f"  [1-4 · DESCARTADO (IGUAL AO SITE)] {sid}/{sol_id}: "
-                            f"já existe mínimo isométrico igual no site ({avaliacao['matched_solution_id']})."
-                        )
-                    else:
-                        stats["rejected_invalid"] += 1
-                        print(f"  [1-4 · REJEITADO (EXIGÊNCIAS)] {sid}/{sol_id}: {avaliacao['reason']}")
+                    stats["rejected_invalid"] += 1
+                    print(f"  [REJEITADO (EXIGÊNCIAS)] {sid}/{sol_id}: {avaliacao['reason']}")
                     continue
 
                 analyzed["fval"] = float(avaliacao["fval_recomputed"])
@@ -322,38 +315,50 @@ def build_static_atlas(
                 analyzed["faces"] = avaliacao["faces_oriented"]
                 analyzed["verified_official"] = True
                 analyzed["geom_hash"] = _compute_geom_hash(analyzed["vertices"], analyzed["faces"])
+                is_iso_rep = bool(avaliacao.get("is_isometric_repeat"))
             else:
-                iso = validador.verificar_igualdade_isometrica(analyzed["vertices"], site_solutions)
-                if iso["is_equal"]:
-                    stats["duplicates_removed"] += 1
-                    continue
                 analyzed["verified_official"] = False
                 analyzed["geom_hash"] = cand_hash
+                is_iso_rep = False
 
-            # Se o solution_id colidir com outro mínimo distinto já existente no site, desambigua com o geom_hash
+            # Se o solution_id colidir com outro registro já existente no site, desambigua com geom_hash/índice
             if analyzed["solution_id"] in existing_by_id:
-                analyzed["solution_id"] = f"{analyzed['solution_id']}_{analyzed['geom_hash'][:6]}"
+                base_dis = f"{analyzed['solution_id']}_{analyzed['geom_hash'][:6]}"
+                cand_dis = base_dis
+                idx_d = 2
+                while cand_dis in existing_by_id:
+                    cand_dis = f"{base_dis}_{idx_d}"
+                    idx_d += 1
+                analyzed["solution_id"] = cand_dis
 
             analyzed["already_on_site"] = True
             analyzed["_dist_matrix"] = construir_matriz_distancias(analyzed["vertices"])
             site_solutions.append(analyzed)
             existing_by_id[analyzed["solution_id"]] = analyzed
             stats["new_solutions_added"] += 1
-            aba_destino = "Resultados" if analyzed["source_folder"] == "convexos" else "Descobertas"
+            aba_destino = "Convexo" if analyzed["source_folder"] == "convexos" else "Não Convexo"
+            tag_iso = " [recorrência isométrica]" if is_iso_rep else " [nova forma]"
             print(
-                f"  [1-4 · NOVO MÍNIMO ADICIONADO AO SITE] {sid}/{analyzed['solution_id']} "
-                f"-> aba {aba_destino} (F(x) = {analyzed['fval']:.2e})"
+                f"  [ADICIONADO] {sid}/{analyzed['solution_id']} -> {aba_destino}{tag_iso} "
+                f"(F(x) = {analyzed['fval']:.2e})"
             )
 
         unique_convex = [s for s in site_solutions if s["source_folder"] == "convexos"]
         unique_nonconvex = [s for s in site_solutions if s["source_folder"] != "convexos"]
-        unique_convex.sort(key=lambda s: (s["fval"], s["timestamp"]))
-        unique_nonconvex.sort(key=lambda s: (s["fval"], s["timestamp"]))
-        unique_globals = unique_convex + unique_nonconvex
+        unique_convex.sort(key=lambda s: (s["fval"], s["timestamp"], s["solution_id"]))
+        unique_nonconvex.sort(key=lambda s: (s["fval"], s["timestamp"], s["solution_id"]))
+        all_globals = unique_convex + unique_nonconvex
 
-        # Renderiza fotos e copia arquivos oficiais para download
+        # Classifica classes de isometria métrica entre todos os globais salvos (sem descartar nenhum!)
+        isometry_classes = validador.classificar_classes_isometricas(all_globals)
+        stats["total_unique_geometries"] += len(isometry_classes)
+
+        # Renderiza fotos otimizadas:
+        #   - Representante canônico de cada forma geométrica: 4 ângulos WebP 720px (+ clean se m>=4) + thumb 360px
+        #   - Recorrências isométricas: foto PythonSCAD própria em WebP 480px (~14 KB) + fallback dos outros ângulos
+        canonical_renders_by_class: Dict[int, Tuple[Dict[str, str], Dict[str, str]]] = {}
         sol_out_list: List[Dict[str, Any]] = []
-        for sol in unique_globals:
+        for sol in all_globals:
             sol_id = sol["solution_id"]
             sol_slug = safe_slug(sol_id)
             cat_folder = sol["source_folder"]  # "convexos" | "nao_convexos"
@@ -362,6 +367,8 @@ def build_static_atlas(
             txt_path = Path(sol["txt_path"]) if sol.get("txt_path") else None
 
             geom_hash = sol.get("geom_hash") or _compute_geom_hash(sol["vertices"], sol["faces"])
+            is_canon = bool(sol.get("is_canonical_in_class", True))
+            iso_cls_id = int(sol.get("isometry_class", 1))
 
             render_map: Dict[str, str] = {}
             render_clean_map: Dict[str, str] = {}
@@ -369,7 +376,14 @@ def build_static_atlas(
             thumb_clean_rel: Optional[str] = None
             has_face_diags = any(len(f) >= 4 for f in sol["faces"])
 
-            def _schedule_or_reuse_webp(preset_key: str, include_diags: bool, target_map: Dict[str, str]) -> Optional[str]:
+            def _schedule_or_reuse_webp(
+                preset_key: str,
+                include_diags: bool,
+                target_map: Dict[str, str],
+                max_px: int = 720,
+                webp_q: int = 88,
+                make_thumb: bool = False,
+            ) -> Optional[str]:
                 suffix = "" if include_diags else "_clean"
                 webp_name = f"{slug}_{geom_hash}_{preset_key}{suffix}.webp"
                 target_webp = renders_dir / webp_name
@@ -377,7 +391,6 @@ def build_static_atlas(
                 used_render_names.add(webp_name)
                 target_map[preset_key] = f"./renders/{webp_name}"
 
-                make_thumb = preset_key == "iso"
                 thumb_name = f"{slug}_{geom_hash}_{preset_key}{suffix}_thumb.webp" if make_thumb else None
                 target_thumb = (renders_dir / thumb_name) if thumb_name else None
                 if thumb_name:
@@ -388,36 +401,52 @@ def build_static_atlas(
                     if target_thumb and (not target_thumb.exists() or target_thumb.stat().st_size <= 300):
                         _save_webp_from_image(target_webp, target_thumb, max_size=360, quality=84)
                 elif not force_renders and legacy_png.exists() and legacy_png.stat().st_size > 1000:
-                    if _save_webp_from_image(legacy_png, target_webp, max_size=720, quality=88):
+                    if _save_webp_from_image(legacy_png, target_webp, max_size=max_px, quality=webp_q):
                         stats["renders_reused"] += 1
                         if target_thumb:
                             _save_webp_from_image(legacy_png, target_thumb, max_size=360, quality=84)
                     else:
                         render_jobs.append((
                             sid, sol_id, scad_path, preset_key,
-                            sol["vertices"], sol["faces"], target_webp, target_thumb, target_map, include_diags,
+                            sol["vertices"], sol["faces"], target_webp, target_thumb, target_map, include_diags, max_px, webp_q,
                         ))
                 else:
                     render_jobs.append((
                         sid, sol_id, scad_path, preset_key,
-                        sol["vertices"], sol["faces"], target_webp, target_thumb, target_map, include_diags,
+                        sol["vertices"], sol["faces"], target_webp, target_thumb, target_map, include_diags, max_px, webp_q,
                     ))
 
                 return f"./renders/{thumb_name}" if thumb_name else None
 
-            for preset in presets:
-                t_rel = _schedule_or_reuse_webp(preset, True, render_map)
-                if preset == "iso":
-                    thumb_rel = t_rel
+            if is_canon:
+                for preset in presets:
+                    t_rel = _schedule_or_reuse_webp(preset, True, render_map, max_px=720, webp_q=88, make_thumb=(preset == "iso"))
+                    if preset == "iso":
+                        thumb_rel = t_rel
 
-                if has_face_diags:
-                    tc_rel = _schedule_or_reuse_webp(preset, False, render_clean_map)
-                    if preset == "iso":
-                        thumb_clean_rel = tc_rel
-                else:
-                    render_clean_map[preset] = render_map[preset]
-                    if preset == "iso":
-                        thumb_clean_rel = thumb_rel
+                    if has_face_diags:
+                        tc_rel = _schedule_or_reuse_webp(preset, False, render_clean_map, max_px=720, webp_q=88, make_thumb=(preset == "iso"))
+                        if preset == "iso":
+                            thumb_clean_rel = tc_rel
+                    else:
+                        render_clean_map[preset] = render_map[preset]
+                        if preset == "iso":
+                            thumb_clean_rel = thumb_rel
+                canonical_renders_by_class[iso_cls_id] = (dict(render_map), dict(render_clean_map))
+            else:
+                # Recorrência isométrica: renderiza foto PythonSCAD própria (iso 480px WebP ~14 KB)
+                # e completa os outros ângulos a partir do representante canônico da classe para manter o site leve
+                _schedule_or_reuse_webp("iso", True, render_map, max_px=480, webp_q=84, make_thumb=False)
+                thumb_rel = render_map.get("iso")
+                render_clean_map["iso"] = render_map["iso"]
+                thumb_clean_rel = thumb_rel
+                canon_r, canon_rc = canonical_renders_by_class.get(iso_cls_id, ({}, {}))
+                for p_alt in presets:
+                    if p_alt != "iso":
+                        if p_alt in canon_r:
+                            render_map[p_alt] = canon_r[p_alt]
+                        if p_alt in canon_rc:
+                            render_clean_map[p_alt] = canon_rc[p_alt]
 
             # Copia arquivos oficiais para downloads estáticos (ou preserva os já existentes em docs/files/)
             sol_files_dir = files_dir / slug / cat_folder
@@ -447,6 +476,12 @@ def build_static_atlas(
             elif dst_txt.exists():
                 dl_map["txt"] = f"./files/{slug}/{cat_folder}/{dst_txt.name}"
 
+            def _round_vec_list(arr, dec=8):
+                return [[round(float(c), dec) for c in row] for row in arr]
+
+            def _round_num_list(arr, dec=6):
+                return [round(float(x), dec) for x in arr]
+
             sol_out = {
                 "solution_id": sol_id,
                 "geom_hash": geom_hash,
@@ -455,6 +490,9 @@ def build_static_atlas(
                 "timestamp": sol["timestamp"],
                 "is_convex": sol["is_convex"],
                 "classification": sol["classification"],
+                "isometry_class": iso_cls_id,
+                "is_canonical_in_class": is_canon,
+                "isometric_to": sol.get("isometric_to"),
                 "has_self_intersection": sol.get("has_self_intersection", False),
                 "self_intersection": sol.get("self_intersection"),
                 "verified_official": sol.get("verified_official", True),
@@ -469,21 +507,24 @@ def build_static_atlas(
                 "renders": render_map,
                 "renders_clean": render_clean_map,
                 "downloads": dl_map,
-                "vertices": sol["vertices"],
+                "vertices": _round_vec_list(sol["vertices"], 8),
                 "faces": sol["faces"],
-                "distancias": sol.get("distancias", []),
-                "angulos_salvos": sol.get("angulos_salvos", []),
+                "distancias": _round_num_list(sol.get("distancias", []), 6),
+                "angulos_salvos": _round_num_list(sol.get("angulos_salvos", []), 4),
                 "autovalores": sol.get("autovalores", []),
             }
             sol_out_list.append(sol_out)
 
         convex_sols = [s for s in sol_out_list if s["source_folder"] == "convexos"]
         nonconvex_sols = [s for s in sol_out_list if s["source_folder"] == "nao_convexos"]
+        unique_convex_count = sum(1 for c in isometry_classes if c.get("is_convex"))
+        unique_nonconvex_count = sum(1 for c in isometry_classes if not c.get("is_convex"))
 
         if sol_out_list:
             stats["solids_with_global"] += 1
             stats["total_global_solutions"] += len(sol_out_list)
             active_detail_slugs.add(f"{slug}.json")
+            # Armazena global_solutions uma única vez (evita dobrar o peso do JSON com duplicação convex/nonconvex)
             detail_payload = {
                 "id": sid,
                 "slug": slug,
@@ -495,8 +536,7 @@ def build_static_atlas(
                 "is_elementary": entry["is_elementary"],
                 "has_topology": entry["has_topology"],
                 "topology": entry["topology"],
-                "convex_solutions": convex_sols,
-                "nonconvex_solutions": nonconvex_sols,
+                "isometry_classes": isometry_classes,
                 "global_solutions": sol_out_list,
             }
             detail_payloads.append((slug, detail_payload))
@@ -550,8 +590,10 @@ def build_static_atlas(
             "global_count": len(sol_out_list),
             "convex_count": len(convex_sols),
             "nonconvex_count": len(nonconvex_sols),
+            "unique_geometry_count": len(isometry_classes),
+            "unique_convex_count": unique_convex_count,
+            "unique_nonconvex_count": unique_nonconvex_count,
             "primary_global": compact_brief(primary_any) if primary_any else None,
-            "global_solutions": [compact_brief(s) for s in sol_out_list],
         })
 
     # Executa todas as renderizações pendentes em paralelo (4 workers PythonSCAD/OpenSCAD -> WebP otimizado)
@@ -559,7 +601,7 @@ def build_static_atlas(
         print(f"[Atlas] Renderizando {len(render_jobs)} fotografia(s) via {renderer.engine_name} em paralelo...")
 
         def _run_job(job):
-            sid, sol_id, scad_path, preset, verts, faces, target_webp, target_thumb, render_map, include_diags = job
+            sid, sol_id, scad_path, preset, verts, faces, target_webp, target_thumb, render_map, include_diags, max_px, webp_q = job
             rendered = renderer.render_solution_png(
                 solid_id=sid,
                 solution_id=sol_id,
@@ -571,7 +613,7 @@ def build_static_atlas(
                 include_diagonals=include_diags,
             )
             if rendered and rendered.exists():
-                ok_full = _save_webp_from_image(rendered, target_webp, max_size=720, quality=88)
+                ok_full = _save_webp_from_image(rendered, target_webp, max_size=max_px, quality=webp_q)
                 if ok_full and target_thumb is not None:
                     _save_webp_from_image(rendered, target_thumb, max_size=360, quality=84)
                 if ok_full:

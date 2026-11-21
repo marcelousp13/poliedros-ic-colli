@@ -10,9 +10,11 @@
 # ==============================================================================
 
 import atexit
+import json
 import os
 import sys
 from datetime import datetime
+import numpy as np
 
 # Garante que o diretório raiz do projeto esteja no sys.path para importação limpa dos módulos
 diretorio_raiz = os.path.dirname(os.path.abspath(__file__))
@@ -56,6 +58,24 @@ except Exception:
 
     def encerrar_sincronizacao_automatica(watcher):
         return None
+
+
+def _detectar_autor_local():
+    """Obtém silenciosamente o nome do pesquisador configurado localmente (sem perguntas extras)."""
+    env_autor = (os.environ.get("ATLAS_AUTOR") or "").strip()
+    if env_autor:
+        return env_autor
+    cfg_path = os.path.join(diretorio_raiz, "web", "config_github.json")
+    if os.path.isfile(cfg_path):
+        try:
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+            autor = str(cfg.get("autor") or "").strip()
+            if autor:
+                return autor
+        except Exception:
+            pass
+    return (os.environ.get("USERNAME") or os.environ.get("USER") or "Pesquisador").strip()
 
 
 # ==============================================================================
@@ -137,13 +157,16 @@ def main():
 
     # Parâmetro de perturbação cúbica para a projeção esferográfica
     epsilon_perturbacao = 0.1
+    escala_plano_esferografica = 5.0
+    autor_local = _detectar_autor_local()
 
     # --------------------------------------------------------------------------
     # LOOP DE PROCESSAMENTO PARA CADA SÓLIDO SELECIONADO
     # --------------------------------------------------------------------------
     for nome in nomes_solidos:
+        sessao_id = datetime.now().strftime("%Y%m%d_%H%M%S")
         print("\n" + "=" * 80)
-        print(f"INICIANDO PROCESSAMENTO DO SÓLIDO: {nome}")
+        print(f"INICIANDO PROCESSAMENTO DO SÓLIDO: {nome} (Sessão {sessao_id})")
         print("=" * 80)
 
         # Cria previamente a estrutura oficial de pastas do sólido:
@@ -177,11 +200,15 @@ def main():
         # Caso a opção 2 tenha sido selecionada, gera a projeção esferográfica planar pré-calculada
         if opcao_inicializacao == "2":
             print("Calculando projeção esferográfica planar base na esfera S^2...")
-            vc_base_esferica = gerador_ci.gerar_projecao_esferografica_tratada(escala_plano=5.0)
+            vc_base_esferica = gerador_ci.gerar_projecao_esferografica_tratada(escala_plano=escala_plano_esferografica)
 
         # Contadores de métricas da execução
         rep = 0
-        encontrados = 0
+        ultimo_rep_global_limpo = 0
+        encontrados_ineditos = 0
+        salvos_globais_limpos = 0
+        contador_degenerados = 0
+        contador_colineares = 0
         contador_globais = 0
         contador_globais_convexos_limpos = 0
         contador_globais_nao_convexos_limpos = 0
@@ -217,8 +244,12 @@ def main():
                             epsilon=epsilon_perturbacao
                         )
 
+                # Memoriza a condição inicial exata e energia inicial F(x0) antes da otimização
+                vc_inicial_copia = np.array(vc_inicial, dtype=float, copy=True)
+                energia_inicial = float(OtimizadorGradiente.calcular_energia(vc_inicial_copia, segmentos))
+
                 # Executa a otimização dinâmica via classe OtimizadorGradiente
-                resultado = otimizador.otimizar(vc_inicial, segmentos, imprimir_passos=True)
+                resultado = otimizador.otimizar(vc_inicial_copia, segmentos, imprimir_passos=True)
                 vc = resultado["vc"]
                 fval = resultado["fval"]
                 converged = resultado["converged"]
@@ -235,11 +266,13 @@ def main():
 
                 # Teste 1 de integridade geométrica: degeneração volumétrica / vértices colapsados
                 if VerificadorGeometrico.verificar_minimo_degenerado(vc, faces):
+                    contador_degenerados += 1
                     print(f"  Atenção: Configuração degenerada detectada (f(x) = {fval:.6e}). Descartada.")
                     continue
 
                 # Teste 2 de integridade geométrica: colinearidade em faces
                 if VerificadorGeometrico.possui_face_colinear(vc, faces):
+                    contador_colineares += 1
                     print(f"  Atenção: Face degenerada/colinear detectada (f(x) = {fval:.6e}). Descartada.")
                     continue
 
@@ -273,7 +306,7 @@ def main():
                         print("     Salvo em com_autointersecao/ (não publicado no site).")
                     elif convexo:
                         contador_globais_convexos_limpos += 1
-                        nome_solucao = f"solucao_global_convexo_{contador_globais_convexos_limpos}"
+                        nome_solucao = f"solucao_global_convexo_a{rep}_g{contador_globais_convexos_limpos}"
                         print(
                             f"  >> MÍNIMO GLOBAL CONVEXO SEM AUTOINTERSEÇÃO! f(x) = {fval:.6e} "
                             f"| V/V_CH = {info_convexidade['volume_ratio']:.5f} "
@@ -282,7 +315,7 @@ def main():
                         )
                     else:
                         contador_globais_nao_convexos_limpos += 1
-                        nome_solucao = f"solucao_global_nao_convexo_{contador_globais_nao_convexos_limpos}"
+                        nome_solucao = f"solucao_global_nao_convexo_a{rep}_g{contador_globais_nao_convexos_limpos}"
                         motivos = "; ".join(info_convexidade["reasons"])
                         print(
                             f"  >> MÍNIMO GLOBAL NÃO CONVEXO SEM AUTOINTERSEÇÃO (DESCOBERTA)! f(x) = {fval:.6e} "
@@ -295,18 +328,35 @@ def main():
                     nome_solucao = f"solucao_local_{rep}"
                     print(f"  -- Mínimo local encontrado: f(x) = {fval:.6e} (Tempo: {elapsed:.2f}s)")
 
-                # Validação de unicidade e gravação via GerenciadorSolucoes
+                # Checagem de isomorfismo métrico (classifica a forma sem descartar globais sem autointerseção)
                 vertices = [tuple(v) for v in vc]
-                eh_inedito = gerenciador_solucoes.verificar_duplicata_e_registrar(
+                eh_global_limpo = (tipo == "global" and not tem_autointersecao)
+                iso_info = gerenciador_solucoes.inspecionar_ou_registrar_isometria(
                     nome_solido=nome,
                     vertices=vertices,
                     distancias=distancias,
                     angulos=angulos,
-                    fval=fval
+                    fval=fval,
+                    registrar_se_inedito=True,
                 )
+                eh_inedito = bool(iso_info["eh_inedito"])
+                classe_iso = int(iso_info["indice_classe"])
 
-                if eh_inedito:
-                    encontrados += 1
+                # Regra oficial atualizada:
+                #   - Globais SEM autointerseção (convexos ou não convexos): SALVAR SEMPRE (mesmo se repetido/isométrico)
+                #   - Locais e globais COM autointerseção: manter deduplicação por isomorfismo (salvar apenas se inédito)
+                deve_salvar = eh_global_limpo or eh_inedito
+
+                if deve_salvar:
+                    if eh_inedito:
+                        encontrados_ineditos += 1
+                    tentativas_desde_anterior = None
+                    if eh_global_limpo:
+                        salvos_globais_limpos += 1
+                        tentativas_desde_anterior = rep - ultimo_rep_global_limpo
+                        ultimo_rep_global_limpo = rep
+
+                    deslocamentos = np.linalg.norm(np.asarray(vc, dtype=float) - vc_inicial_copia, axis=1)
                     timestamp_solucao = datetime.now().strftime("%Y%m%d_%H%M%S")
                     metodo_inicial_nome = (
                         "Hipercubo [-L, L]³ (Teorema 1)"
@@ -318,19 +368,47 @@ def main():
                         )
                     )
                     info_execucao = {
+                        "sessao_id": sessao_id,
+                        "autor": autor_local,
                         "metodo_inicial": metodo_inicial_nome,
                         "codigo_metodo_inicial": opcao_inicializacao,
                         "lado_L": round(float(L_topologico), 6),
-                        "epsilon_perturbacao": float(epsilon_perturbacao) if opcao_inicializacao == "2" else None,
+                        "escala_plano": float(escala_plano_esferografica) if opcao_inicializacao == "2" else None,
+                        "epsilon_perturbacao": (
+                            0.0 if (opcao_inicializacao == "2" and rep == 1)
+                            else (float(epsilon_perturbacao) if opcao_inicializacao == "2" else None)
+                        ),
                         "tamanho_amostra": m,
+                        "amostra_atual": int(rep),
                         "tentativa": int(rep),
+                        "tentativas_desde_ultimo_global": tentativas_desde_anterior,
+                        "energia_inicial": energia_inicial,
+                        "deslocamento_medio_vertices": round(float(np.mean(deslocamentos)), 6),
+                        "deslocamento_max_vertices": round(float(np.max(deslocamentos)), 6),
                         "iteracoes_otimizador": int(resultado.get("it", 0)),
                         "tempo_segundos": round(float(elapsed), 4),
                         "norm_grad": float(norm_g),
                         "converged": bool(converged),
-                        "vc_inicial": vc_inicial.tolist() if hasattr(vc_inicial, "tolist") else [list(v) for v in vc_inicial],
+                        "eh_inedito_isometrico": eh_inedito,
+                        "classe_isometria_local": classe_iso,
+                        "parametros_otimizador": {
+                            "alpha": otimizador.alpha,
+                            "amortecimento": otimizador.amortecimento,
+                            "grad_tol": otimizador.grad_tol,
+                            "max_iter": otimizador.max_iter,
+                            "max_step": otimizador.max_step,
+                        },
+                        "contadores_sessao": {
+                            "degenerados": contador_degenerados,
+                            "colineares": contador_colineares,
+                            "locais": contador_locais,
+                            "globais_convexos_limpos": contador_globais_convexos_limpos,
+                            "globais_nao_convexos_limpos": contador_globais_nao_convexos_limpos,
+                            "globais_com_intersecao": contador_globais_com_intersecao,
+                        },
+                        "vc_inicial": vc_inicial_copia.tolist(),
                     }
-                    gerenciador_solucoes.salvar_arquivos_solucao(
+                    json_salvo, _ = gerenciador_solucoes.salvar_arquivos_solucao(
                         nome_solucao=nome_solucao,
                         tipo=tipo,
                         nome_solido=nome,
@@ -346,7 +424,15 @@ def main():
                         timestamp=timestamp_solucao,
                         info_execucao=info_execucao,
                     )
-                    print("  Configuração geométrica inédita registrada com sucesso.")
+                    nome_base_usado = gerenciador_solucoes.ultimo_nome_base or os.path.splitext(os.path.basename(json_salvo))[0]
+
+                    if eh_inedito:
+                        print(f"  Configuração geométrica inédita registrada (Classe #{classe_iso}).")
+                    else:
+                        print(
+                            f"  Recorrência isométrica da Classe #{classe_iso} salva integralmente "
+                            f"(amostra #{rep}{suffix}, com x₀ e PythonSCAD)."
+                        )
 
                     # Se for MÍNIMO GLOBAL, gera o código interativo em PythonSCAD na respectiva subpasta
                     exportador_scad.exportar_se_minimo_global(
@@ -358,10 +444,11 @@ def main():
                         fval=fval,
                         convexo=bool(convexo),
                         tem_autointersecao=tem_autointersecao,
-                        timestamp=timestamp_solucao
+                        timestamp=timestamp_solucao,
+                        nome_base_exato=nome_base_usado,
                     )
                 else:
-                    print("  Configuração descartada por duplicidade isométrica (isomorfismo métrico detectado).")
+                    print("  Configuração local/com autointerseção descartada por duplicidade isométrica.")
 
         except KeyboardInterrupt:
             print("\nExecução interrompida pelo usuário via teclado (Ctrl+C).")
@@ -378,8 +465,10 @@ def main():
             f"Não convexos sem autointerseção: {contador_globais_nao_convexos_limpos} | "
             f"Com autointerseção: {contador_globais_com_intersecao})"
         )
+        print(f" - Globais sem autointerseção salvos (todos): {salvos_globais_limpos}")
         print(f" - Mínimos locais (válidos): {contador_locais}")
-        print(f" - Mínimos inéditos catalogados: {encontrados}")
+        print(f" - Descartados (degenerados/colineares): {contador_degenerados}/{contador_colineares}")
+        print(f" - Formas geométricas inéditas registradas: {encontrados_ineditos}")
         print("=" * 60)
 
     # Garante o envio final de qualquer mínimo global recém-descoberto antes de encerrar

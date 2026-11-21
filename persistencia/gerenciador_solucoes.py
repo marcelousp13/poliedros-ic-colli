@@ -47,6 +47,8 @@ class GerenciadorSolucoes:
             self.pasta_base = pasta_base
 
         self.tol = float(tol)
+        self._banco_cache = {}
+        self.ultimo_nome_base = None
         os.makedirs(self.pasta_base, exist_ok=True)
 
     def preparar_estrutura_solido(self, nome_solido):
@@ -83,17 +85,22 @@ class GerenciadorSolucoes:
             "nao_convexos_com_autointersecao": pasta_nconv_com,
         }
 
-    def verificar_duplicata_e_registrar(self, nome_solido, vertices, distancias, angulos, fval):
+    def inspecionar_ou_registrar_isometria(
+        self,
+        nome_solido,
+        vertices,
+        distancias,
+        angulos,
+        fval,
+        registrar_se_inedito=True,
+    ):
         """
-        Verifica se a configuração já foi registrada previamente comparando
-        o espectro de distâncias, ângulos diedrais e valor da função objetivo.
-        
-        Se for uma solução inédita:
-            - Registra no arquivo binário 'minimos.npy'
-            - Grava as coordenadas dos vértices em 'pontos.txt'
-            - Retorna True
-        Se for duplicada:
-            - Retorna False
+        Compara `vertices` com o histórico de formas distintas em `minimos.npy` via
+        isomorfismo métrico (backtracking).
+        Retorna dict com:
+          - eh_inedito (bool): True se for uma nova forma geométrica
+          - indice_classe (int): índice 1-based da forma geométrica correspondente em `minimos.npy`
+        Mantém cache em RAM por sólido para evitar leituras repetidas em amostras grandes.
         """
         pasta_solido = os.path.join(self.pasta_base, nome_solido)
         os.makedirs(pasta_solido, exist_ok=True)
@@ -101,56 +108,72 @@ class GerenciadorSolucoes:
         banco_npy = os.path.join(pasta_solido, "minimos.npy")
         pontos_txt = os.path.join(pasta_solido, "pontos.txt")
 
-        # Carrega o histórico de mínimos salvos para este sólido
-        if os.path.exists(banco_npy):
+        if nome_solido in self._banco_cache:
+            dados = self._banco_cache[nome_solido]
+        elif os.path.exists(banco_npy):
             try:
                 dados = np.load(banco_npy, allow_pickle=True).tolist()
             except Exception:
                 dados = []
+            self._banco_cache[nome_solido] = dados
         else:
             dados = []
+            self._banco_cache[nome_solido] = dados
 
         matriz_dist = construir_matriz_distancias(vertices)
 
         # Compara com os registros existentes utilizando isomorfismo métrico
-        for antigo in dados:
-            # Pré-filtro: energias devem ser compatíveis
+        for idx, antigo in enumerate(dados):
             if abs(antigo["fval"] - fval) <= 1e-4:
                 matriz_antiga = antigo.get("matriz_distancias")
                 if matriz_antiga is None and "vertices" in antigo:
                     matriz_antiga = construir_matriz_distancias(antigo["vertices"])
+                    antigo["matriz_distancias"] = matriz_antiga
 
                 if matriz_antiga is not None:
-                    # Teste rigoroso de isomorfismo métrico via backtracking
                     perm = resolver_isomorfismo(matriz_dist, matriz_antiga, tol=1e-4, decimais=4)
                     if perm is not None:
-                        return False  # Duplicata isométrica comprovada
+                        return {"eh_inedito": False, "indice_classe": idx + 1}
                 else:
-                    # Fallback para registros antigos legados
                     if (
                         np.allclose(antigo["distancias"], distancias, atol=self.tol, rtol=0)
                         and np.allclose(antigo["angulos"], angulos, atol=self.tol, rtol=0)
                     ):
-                        return False  # Duplicata detectada
+                        return {"eh_inedito": False, "indice_classe": idx + 1}
 
-        # Adiciona a nova solução ao banco com sua matriz de distâncias completa
-        dados.append({
-            "distancias": np.asarray(distancias, dtype=float),
-            "angulos": np.asarray(angulos, dtype=float),
-            "fval": float(fval),
-            "vertices": np.asarray(vertices, dtype=float),
-            "matriz_distancias": np.asarray(matriz_dist, dtype=float)
-        })
-        np.save(banco_npy, dados)
+        novo_indice = len(dados) + 1
+        if registrar_se_inedito:
+            dados.append({
+                "distancias": np.asarray(distancias, dtype=float),
+                "angulos": np.asarray(angulos, dtype=float),
+                "fval": float(fval),
+                "vertices": np.asarray(vertices, dtype=float),
+                "matriz_distancias": np.asarray(matriz_dist, dtype=float),
+            })
+            np.save(banco_npy, dados)
 
-        # Registra no log de pontos.txt
-        with open(pontos_txt, "a", encoding="utf-8") as f:
-            f.write(f"Novo mínimo encontrado em {datetime.now().isoformat()}:\n")
-            for i, v in enumerate(vertices):
-                f.write(f"v[{i}] = [{v[0]:.6f}, {v[1]:.6f}, {v[2]:.6f}]\n")
-            f.write("\n")
+            with open(pontos_txt, "a", encoding="utf-8") as f:
+                f.write(f"Novo mínimo encontrado em {datetime.now().isoformat()} (Classe #{novo_indice}):\n")
+                for i, v in enumerate(vertices):
+                    f.write(f"v[{i}] = [{v[0]:.6f}, {v[1]:.6f}, {v[2]:.6f}]\n")
+                f.write("\n")
 
-        return True
+        return {"eh_inedito": True, "indice_classe": novo_indice}
+
+    def verificar_duplicata_e_registrar(self, nome_solido, vertices, distancias, angulos, fval):
+        """
+        Compatibilidade: verifica se a configuração é inédita por isomorfismo métrico,
+        registrando-a em `minimos.npy` e `pontos.txt` se for inédita.
+        """
+        res = self.inspecionar_ou_registrar_isometria(
+            nome_solido=nome_solido,
+            vertices=vertices,
+            distancias=distancias,
+            angulos=angulos,
+            fval=fval,
+            registrar_se_inedito=True,
+        )
+        return bool(res["eh_inedito"])
 
     def salvar_arquivos_solucao(
         self,
@@ -197,7 +220,13 @@ class GerenciadorSolucoes:
             destino_dir = pastas["minimos_locais"]
 
         timestamp = timestamp or datetime.now().strftime("%Y%m%d_%H%M%S")
-        nome_base = f"{nome_solucao}_{timestamp}"
+        nome_base_candidato = f"{nome_solucao}_{timestamp}"
+        nome_base = nome_base_candidato
+        sufixo_colisao = 2
+        while os.path.exists(os.path.join(destino_dir, f"{nome_base}.json")):
+            nome_base = f"{nome_base_candidato}_{sufixo_colisao}"
+            sufixo_colisao += 1
+        self.ultimo_nome_base = nome_base
         json_path = os.path.join(destino_dir, f"{nome_base}.json")
         txt_path = os.path.join(destino_dir, f"{nome_base}.txt")
 
@@ -238,11 +267,11 @@ class GerenciadorSolucoes:
             dados["execucao"] = exec_clean
 
         with open(json_path, "w", encoding="utf-8") as f:
-            json.dump(dados, f, indent=4, ensure_ascii=False)
+            json.dump(dados, f, indent=2, ensure_ascii=False)
 
         # Arquivo de texto legível para conferência analítica direta
         with open(txt_path, "w", encoding="utf-8") as f:
-            f.write(f"Solução: {nome_solucao}\n")
+            f.write(f"Solução: {nome_base}\n")
             f.write(f"Tipo: {tipo}\n")
             if classificacao is not None:
                 label_conv = "Convexo" if convexo else "Não convexo"
@@ -253,13 +282,35 @@ class GerenciadorSolucoes:
                 metodo_lbl = info_execucao.get("metodo_inicial") or "Não informado"
                 amostra_val = info_execucao.get("tamanho_amostra")
                 amostra_lbl = "Ilimitada" if amostra_val is None else str(amostra_val)
-                tentativa_val = info_execucao.get("tentativa")
+                amostra_atual = info_execucao.get("amostra_atual", info_execucao.get("tentativa"))
+                tent_desde = info_execucao.get("tentativas_desde_ultimo_global")
                 iters_val = info_execucao.get("iteracoes_otimizador")
                 tempo_val = info_execucao.get("tempo_segundos")
+                norm_g_val = info_execucao.get("norm_grad")
+                e_ini = info_execucao.get("energia_inicial")
+                autor_lbl = info_execucao.get("autor")
+                sessao_lbl = info_execucao.get("sessao_id")
+                classe_iso = info_execucao.get("classe_isometria_local")
+                eh_ined = info_execucao.get("eh_inedito_isometrico")
+                if autor_lbl or sessao_lbl:
+                    f.write(f"Pesquisador / Sessão: {autor_lbl or '—'} | Sessão: {sessao_lbl or '—'}\n")
                 f.write(f"Condição inicial (método): {metodo_lbl}\n")
-                f.write(f"Tamanho da amostra: {amostra_lbl} | Tentativa necessária: {tentativa_val if tentativa_val is not None else '—'}\n")
-                if iters_val is not None or tempo_val is not None:
-                    f.write(f"Convergência: {iters_val if iters_val is not None else '—'} iterações | Tempo: {tempo_val if tempo_val is not None else '—'}s\n")
+                f.write(
+                    f"Amostragem: amostra atual #{amostra_atual if amostra_atual is not None else '—'} "
+                    f"/ tamanho da amostra = {amostra_lbl}"
+                    f"{f' (tentativas desde o global anterior: {tent_desde})' if tent_desde is not None else ''}\n"
+                )
+                if e_ini is not None:
+                    f.write(f"Energia inicial F(x0): {float(e_ini):.6e}\n")
+                if iters_val is not None or tempo_val is not None or norm_g_val is not None:
+                    ng_str = f" | ||grad|| = {float(norm_g_val):.3e}" if norm_g_val is not None else ""
+                    f.write(
+                        f"Convergência: {iters_val if iters_val is not None else '—'} iterações "
+                        f"| Tempo: {tempo_val if tempo_val is not None else '—'}s{ng_str}\n"
+                    )
+                if classe_iso is not None or eh_ined is not None:
+                    iso_lbl = "Inédito" if eh_ined else "Recorrência isométrica"
+                    f.write(f"Isometria local: Classe #{classe_iso if classe_iso is not None else '—'} ({iso_lbl})\n")
             if convexidade_serializada is not None:
                 f.write(
                     f"Volume / Volume Envoltória Convexa: "
@@ -291,6 +342,12 @@ class GerenciadorSolucoes:
             f.write("\n--- Coordenadas dos Vértices (vc) ---\n")
             for v in (vc.tolist() if hasattr(vc, "tolist") else vc):
                 f.write(f"[{v[0]:.8f}, {v[1]:.8f}, {v[2]:.8f}]\n")
+            if info_execucao is not None and info_execucao.get("vc_inicial") is not None:
+                vc_ini = info_execucao["vc_inicial"]
+                vc_ini_list = vc_ini.tolist() if hasattr(vc_ini, "tolist") else list(vc_ini)
+                f.write("\n--- Condição Inicial dos Vértices (x0 / vc_inicial) ---\n")
+                for v in vc_ini_list:
+                    f.write(f"[{float(v[0]):.8f}, {float(v[1]):.8f}, {float(v[2]):.8f}]\n")
 
         print(f"Solução gravada com sucesso em:\n - {json_path}\n - {txt_path}")
         return json_path, txt_path

@@ -74,6 +74,7 @@ class ExportadorPythonSCAD:
         convexo=True,
         tem_autointersecao=False,
         timestamp=None,
+        nome_base_exato=None,
     ):
         # Verificação rigorosa: somente exporta se o tipo de solução for 'global'
         if tipo_solucao != "global":
@@ -88,11 +89,12 @@ class ExportadorPythonSCAD:
         # Cria o diretório recursivamente caso não exista
         os.makedirs(destino_dir, exist_ok=True)
 
-        # Gera timestamp formatado no padrão YYYYMMDD_HHMMSS (ou reutiliza o mesmo do JSON/TXT)
-        timestamp = timestamp or datetime.now().strftime('%Y%m%d_%H%M%S')
-
-        # Define o nome do arquivo com a extensão .py (executável PythonSCAD)
-        nome_arquivo = f"{nome_solucao}_{timestamp}_pythonscad.py"
+        if nome_base_exato:
+            nome_arquivo = f"{nome_base_exato}_pythonscad.py"
+        else:
+            # Gera timestamp formatado no padrão YYYYMMDD_HHMMSS (ou reutiliza o mesmo do JSON/TXT)
+            timestamp = timestamp or datetime.now().strftime('%Y%m%d_%H%M%S')
+            nome_arquivo = f"{nome_solucao}_{timestamp}_pythonscad.py"
         # Caminho completo do arquivo no sistema de arquivos
         caminho_completo = os.path.join(destino_dir, nome_arquivo)
 

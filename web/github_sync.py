@@ -243,31 +243,40 @@ def push_files_via_worker(
     if not worker_url or not team_key:
         return False, "Cloudflare Worker ou chave da equipe não configurados."
 
-    payload = {
-        "autor": cfg.get("autor") or "Pesquisador",
-        "commit_message": commit_message,
-        "files": [
-            {
-                "path": rel_posix,
-                "content_base64": base64.b64encode(raw_bytes).decode("ascii"),
-            }
-            for rel_posix, raw_bytes in files
-        ],
-    }
-    status, data = _http_json_request(
-        "POST",
-        f"{worker_url}/submit",
-        headers={
-            "X-Team-Key": team_key,
-            "User-Agent": "IC-com-Colli-Atlas-Sync/1.0",
-        },
-        payload=payload,
-        timeout=60,
-    )
-    if status == 200 and isinstance(data, dict) and data.get("ok"):
-        return True, data.get("message") or "Enviado via Cloudflare Worker."
-    msg = data.get("message", str(data)) if isinstance(data, dict) else str(data)
-    return False, f"Erro Worker ({status}): {msg}"
+    # Envia em lotes de até 24 arquivos (8 soluções completas) para respeitar o limite do Worker (30/req)
+    batch_size = 24
+    total_batches = (len(files) + batch_size - 1) // batch_size
+    last_msg = "Enviado via Cloudflare Worker."
+    for b_idx in range(total_batches):
+        chunk = files[b_idx * batch_size : (b_idx + 1) * batch_size]
+        batch_msg = commit_message if total_batches == 1 else f"{commit_message} [lote {b_idx + 1}/{total_batches}]"
+        payload = {
+            "autor": cfg.get("autor") or "Pesquisador",
+            "commit_message": batch_msg,
+            "files": [
+                {
+                    "path": rel_posix,
+                    "content_base64": base64.b64encode(raw_bytes).decode("ascii"),
+                }
+                for rel_posix, raw_bytes in chunk
+            ],
+        }
+        status, data = _http_json_request(
+            "POST",
+            f"{worker_url}/submit",
+            headers={
+                "X-Team-Key": team_key,
+                "User-Agent": "IC-com-Colli-Atlas-Sync/1.0",
+            },
+            payload=payload,
+            timeout=60,
+        )
+        if status == 200 and isinstance(data, dict) and data.get("ok"):
+            last_msg = data.get("message") or last_msg
+        else:
+            msg = data.get("message", str(data)) if isinstance(data, dict) else str(data)
+            return False, f"Erro Worker ({status}, lote {b_idx + 1}/{total_batches}): {msg}"
+    return True, last_msg
 
 
 def _gh_request(method: str, url: str, token: str, payload: Optional[Dict[str, Any]] = None) -> Tuple[int, Any]:
@@ -606,6 +615,8 @@ def _get_existing_site_solutions_for_solid(
     slug = safe_slug(solid_id)
     site_solutions: List[Dict[str, Any]] = []
 
+    seen_exact_keys = set()
+
     def _absorb_solution_list(sol_list: List[Dict[str, Any]]):
         for s in sol_list:
             verts = s.get("vertices") or s.get("vc")
@@ -614,13 +625,15 @@ def _get_existing_site_solutions_for_solid(
             check = validador.validar_solucao_global(solid_id, verts, s.get("faces"))
             if not check["valid"]:
                 continue
-            iso = validador.verificar_igualdade_isometrica(verts, site_solutions)
-            if iso["is_equal"]:
-                continue
             faces = check["faces_oriented"]
             gh = s.get("geom_hash") or _compute_geom_hash(verts, faces)
+            sid_item = s.get("solution_id") or s.get("nome") or f"site_{gh[:8]}"
+            exact_key = (sid_item, gh)
+            if exact_key in seen_exact_keys:
+                continue
+            seen_exact_keys.add(exact_key)
             site_solutions.append({
-                "solution_id": s.get("solution_id") or s.get("nome") or f"site_{gh[:8]}",
+                "solution_id": sid_item,
                 "geom_hash": gh,
                 "vertices": verts,
                 "faces": faces,
@@ -809,27 +822,20 @@ def sync_global_solutions_to_github(
                     rejected_invalid_count += 1
                     continue
             else:
-                avaliacao = validador.avaliar_novo_minimo_4_passos(sid, analyzed, site_solutions)
+                avaliacao = validador.avaliar_novo_minimo_4_passos(
+                    sid, analyzed, site_solutions, permitir_isometricos=True
+                )
                 if not avaliacao["accepted"]:
-                    if avaliacao["status"] == "descartado_igual":
-                        discarded_equal_count += 1
-                        print(
-                            f"  [1-4 · DESCARTADO (IGUAL AO SITE)] {sid}/{sol_id}: "
-                            f"já existe mínimo isométrico igual no site ({avaliacao['matched_solution_id']})."
-                        )
-                        for rel_posix, _, sig in pending_paths:
-                            sent_reg[rel_posix] = f"discarded_equal:{sig}"
-                            reg_dirty = True
-                    else:
-                        rejected_invalid_count += 1
-                        print(f"  [1-4 · REJEITADO (EXIGÊNCIAS)] {sid}/{sol_id}: {avaliacao['reason']}")
-                        for rel_posix, _, sig in pending_paths:
-                            sent_reg[rel_posix] = f"discarded_invalid:{sig}"
-                            reg_dirty = True
+                    rejected_invalid_count += 1
+                    print(f"  [REJEITADO (EXIGÊNCIAS)] {sid}/{sol_id}: {avaliacao['reason']}")
+                    for rel_posix, _, sig in pending_paths:
+                        sent_reg[rel_posix] = f"discarded_invalid:{sig}"
+                        reg_dirty = True
                     continue
 
+                tag_iso = " [recorrência isométrica]" if avaliacao.get("is_isometric_repeat") else " [nova forma]"
                 print(
-                    f"  [1-4 · NOVO MÍNIMO APROVADO] {sid}/{sol_id} -> aba {avaliacao['target_tab']} "
+                    f"  [APROVADO] {sid}/{sol_id} -> {avaliacao['target_tab']}{tag_iso} "
                     f"(F(x) = {avaliacao['fval_recomputed']:.2e})"
                 )
                 analyzed["already_on_site"] = True
@@ -971,6 +977,7 @@ def pull_new_minima_from_github(rebuild_docs: bool = True) -> Tuple[bool, str, i
 
         # Base local combinada: docs/data/solids/ + solidos/<sid>/minimos_globais/
         site_solutions = list(local_site_map.get(sid, []))
+        local_exact_keys = {(s.get("solution_id"), s.get("geom_hash")) for s in site_solutions}
         local_sdir = PROJECT_ROOT / "solidos" / sid
         if local_sdir.is_dir():
             faces_raw = (solids_meta_map.get(sid) or {}).get("faces_raw") or []
@@ -978,17 +985,18 @@ def pull_new_minima_from_github(rebuild_docs: bool = True) -> Tuple[bool, str, i
                 analyzed = catalog_svc._analyze_global_record(sid, faces_raw, rec)
                 if analyzed is None or not analyzed.get("vertices"):
                     continue
-                iso = validador.verificar_igualdade_isometrica(analyzed["vertices"], site_solutions)
-                if not iso["is_equal"]:
+                ek = (analyzed.get("solution_id"), analyzed.get("geom_hash"))
+                if ek not in local_exact_keys:
+                    local_exact_keys.add(ek)
                     analyzed["already_on_site"] = True
                     analyzed["_dist_matrix"] = construir_matriz_distancias(analyzed["vertices"])
                     site_solutions.append(analyzed)
 
-        # Atalho rápido: se o remoto tem a mesma contagem e não há razão para baixar, ainda verificamos
-        # se total remoto > local ou se algum geom_hash diferir
+        # Atalho rápido: evita baixar o dossiê se a contagem remota não exceder a local e o principal já existir
+        remote_count = int(item.get("global_count") or 0)
+        remote_primary_hash = (item.get("primary_global") or {}).get("geom_hash")
         local_hashes = {s.get("geom_hash") for s in site_solutions if s.get("geom_hash")}
-        remote_compact = item.get("global_solutions") or []
-        if remote_compact and all(rc.get("geom_hash") in local_hashes for rc in remote_compact if rc.get("geom_hash")):
+        if remote_count <= len(site_solutions) and (not remote_primary_hash or remote_primary_hash in local_hashes):
             continue
 
         remote_detail = (
@@ -1007,23 +1015,29 @@ def pull_new_minima_from_github(rebuild_docs: bool = True) -> Tuple[bool, str, i
             verts = rsol.get("vertices")
             if not verts:
                 continue
-            avaliacao = validador.avaliar_novo_minimo_4_passos(sid, rsol, site_solutions)
+            r_sid = str(rsol.get("solution_id") or "solucao_global_github")
+            r_gh = rsol.get("geom_hash")
+            if (r_sid, r_gh) in local_exact_keys:
+                continue
+            avaliacao = validador.avaliar_novo_minimo_4_passos(
+                sid, rsol, site_solutions, permitir_isometricos=True
+            )
             if not avaliacao["accepted"]:
                 continue
 
-            # Novo mínimo inédito vindo do Atlas remoto! Salva em solidos/<sid>/minimos_globais/...
+            # Novo registro global válido vindo do Atlas remoto! Salva em solidos/<sid>/minimos_globais/...
             fval = float(avaliacao["fval_recomputed"])
             is_conv = bool(avaliacao["is_convex"])
             faces_or = avaliacao["faces_oriented"]
             dists = rsol.get("distancias") or VerificadorGeometrico.calcular_distancias(verts).tolist()
             angs = rsol.get("angulos_salvos") or VerificadorGeometrico.calcular_angulos_diedrais(verts, faces_or).tolist()
             autovals = rsol.get("autovalores") or []
-            sol_id = str(rsol.get("solution_id") or "solucao_global_github")
+            sol_id = r_sid
             m_ts = re.match(r"^(.*)_(\d{8}_\d{6})$", sol_id)
             nome_base = m_ts.group(1) if m_ts else sol_id
             ts_val = m_ts.group(2) if m_ts else None
 
-            gerenciador.verificar_duplicata_e_registrar(sid, verts, dists, angs, fval)
+            gerenciador.inspecionar_ou_registrar_isometria(sid, verts, dists, angs, fval, registrar_se_inedito=True)
             j_path, t_path = gerenciador.salvar_arquivos_solucao(
                 nome_solucao=nome_base,
                 tipo="global",
@@ -1040,6 +1054,7 @@ def pull_new_minima_from_github(rebuild_docs: bool = True) -> Tuple[bool, str, i
                 timestamp=ts_val,
                 info_execucao=rsol.get("execucao"),
             )
+            nome_base_usado = gerenciador.ultimo_nome_base or Path(j_path).stem
             s_path = exportador.exportar_se_minimo_global(
                 nome_solido=sid,
                 nome_solucao=nome_base,
@@ -1050,6 +1065,7 @@ def pull_new_minima_from_github(rebuild_docs: bool = True) -> Tuple[bool, str, i
                 convexo=is_conv,
                 tem_autointersecao=False,
                 timestamp=ts_val,
+                nome_base_exato=nome_base_usado,
             )
             # Marca arquivos puxados como já presentes no remoto para o vigia não reenviar
             for fp_str in (j_path, t_path, s_path):
@@ -1063,8 +1079,9 @@ def pull_new_minima_from_github(rebuild_docs: bool = True) -> Tuple[bool, str, i
             rsol_copy["already_on_site"] = True
             rsol_copy["_dist_matrix"] = construir_matriz_distancias(verts)
             site_solutions.append(rsol_copy)
+            local_exact_keys.add((r_sid, r_gh))
             added_count += 1
-            print(f"  [Atlas Pull · NOVO MÍNIMO] {sid}/{sol_id} sincronizado localmente (-> {avaliacao['target_tab']}).")
+            print(f"  [Atlas Pull · REGISTRO GLOBAL] {sid}/{sol_id} sincronizado localmente (-> {avaliacao['target_tab']}).")
 
     if reg_dirty:
         save_sent_registry(sent_reg)

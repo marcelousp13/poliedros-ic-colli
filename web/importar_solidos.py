@@ -187,6 +187,7 @@ def _discover_candidates_in_sources(
                 "distancias": data.get("distancias"),
                 "angulos_diedrais": data.get("angulos_diedrais"),
                 "autovalores": data.get("autovalores"),
+                "execucao": data.get("execucao"),
             })
 
         # Também suporta pastas que tenham scripts *_pythonscad.py órfãos (sem .json ao lado)
@@ -222,6 +223,7 @@ def _discover_candidates_in_sources(
                 "distancias": None,
                 "angulos_diedrais": None,
                 "autovalores": None,
+                "execucao": None,
             })
 
     return candidates_by_solid
@@ -269,8 +271,12 @@ def importar_pasta(
         faces_oriented = OrientadorFaces.corrigir_orientacao(faces_raw)
         dest_solid = PROJECT_ROOT / "solidos" / solid_id
 
-        # Passo 2: Base de mínimos que JÁ existem no site para este sólido
+        # Passo 2: Base de mínimos que JÁ existem no site para este sólido (preservando recorrências)
         site_solutions = list(existing_site_map.get(solid_id, []))
+        seen_exact_keys: Set[Tuple[str, str]] = {
+            (str(s.get("solution_id", "")), str(s.get("geom_hash") or _compute_geom_hash(s.get("vertices") or [])))
+            for s in site_solutions
+        }
         if not clean_loose_files and dest_solid.is_dir():
             for rec in catalog_svc._collect_global_records(dest_solid):
                 analyzed = catalog_svc._analyze_global_record(solid_id, faces_raw, rec)
@@ -279,9 +285,12 @@ def importar_pasta(
                 check = validador.validar_solucao_global(solid_id, analyzed["vertices"], faces_oriented)
                 if not check["valid"]:
                     continue
-                iso = validador.verificar_igualdade_isometrica(analyzed["vertices"], site_solutions)
-                if not iso["is_equal"]:
+                gh = _compute_geom_hash(analyzed["vertices"])
+                ex_key = (str(analyzed.get("solution_id", "")), gh)
+                if ex_key not in seen_exact_keys:
+                    seen_exact_keys.add(ex_key)
                     analyzed["already_on_site"] = True
+                    analyzed["geom_hash"] = gh
                     analyzed["_dist_matrix"] = construir_matriz_distancias(analyzed["vertices"])
                     site_solutions.append(analyzed)
 
@@ -310,27 +319,28 @@ def importar_pasta(
 
             vc = cand["vc"]
             sol_id = cand["solution_id"]
+            gh_cand = _compute_geom_hash(vc)
+            if not clean_loose_files and (sol_id, gh_cand) in seen_exact_keys:
+                dups_here += 1
+                continue
 
             # ==================================================================
-            # PROTOCOLO DE 4 PASSOS:
+            # PROTOCOLO CIENTÍFICO (TODOS OS GLOBAIS SEM AUTOINTERSEÇÃO):
             #   1. Novo mínimo na pasta informada (ex.: pasta de Colli ou Thomas)
-            #   2. Verifica se já existe mínimo para esse sólido no site
-            #   3. Verifica se é igual (isomorfismo métrico)
-            #   4. Se for igual, descarta; se for novo e cumprir todas as exigências, adiciona
+            #   2. Valida todas as exigências científicas (global, sem autointerseção)
+            #   3. Classifica isometria em relação aos já catalogados
+            #   4. Adiciona TODOS os mínimos globais limpos (inéditos ou recorrências)
             # ==================================================================
             avaliacao = validador.avaliar_novo_minimo_4_passos(
                 solid_id,
                 {"solution_id": sol_id, "vertices": vc, "faces": faces_oriented},
                 site_solutions,
+                permitir_isometricos=True,
             )
 
             if not avaliacao["accepted"]:
                 if avaliacao["status"] == "descartado_igual":
                     dups_here += 1
-                    print(
-                        f"  [1-4 · DESCARTADO (IGUAL AO SITE)] {solid_id}/{sol_id} == "
-                        f"{avaliacao['matched_solution_id']}"
-                    )
                     continue
 
                 v_info = avaliacao.get("validation") or {}
@@ -350,6 +360,7 @@ def importar_pasta(
                         "distancias": cand["distancias"] or VerificadorGeometrico.calcular_distancias(vc).tolist(),
                         "angulos_diedrais": cand["angulos_diedrais"] or VerificadorGeometrico.calcular_angulos_diedrais(vc, faces_oriented).tolist(),
                         "autovalores": cand["autovalores"] or [],
+                        "execucao": cand.get("execucao"),
                     })
                     cnt_with_inter += 1
                 else:
@@ -372,13 +383,17 @@ def importar_pasta(
                 "distancias": cand["distancias"] or VerificadorGeometrico.calcular_distancias(vc).tolist(),
                 "angulos_diedrais": cand["angulos_diedrais"] or VerificadorGeometrico.calcular_angulos_diedrais(vc, faces_oriented).tolist(),
                 "autovalores": cand["autovalores"] or [],
+                "execucao": cand.get("execucao"),
                 "already_on_site": True,
+                "geom_hash": gh_cand,
                 "_dist_matrix": construir_matriz_distancias(vc),
             }
+            seen_exact_keys.add((sol_id, gh_cand))
             site_solutions.append(cand_obj)
             new_for_site.append(cand_obj)
+            tag_rec = " (recorrência isométrica)" if avaliacao.get("is_isometric_repeat") else ""
             print(
-                f"  [1-4 · NOVO MÍNIMO APROVADO] {solid_id}/{sol_id} -> aba {avaliacao['target_tab']} "
+                f"  [1-4 · MÍNIMO APROVADO{tag_rec}] {solid_id}/{sol_id} -> aba {avaliacao['target_tab']} "
                 f"(F(x) = {cand_obj['fval']:.2e})"
             )
 
@@ -409,7 +424,7 @@ def importar_pasta(
 
             for s in to_write:
                 nome_sol, ts = _extract_stem_and_ts(s["solution_id"])
-                gerenciador.verificar_duplicata_e_registrar(
+                gerenciador.inspecionar_ou_registrar_isometria(
                     nome_solido=solid_id,
                     vertices=s["vertices"],
                     distancias=s["distancias"],
@@ -430,6 +445,7 @@ def importar_pasta(
                     info_convexidade=s["convexity"],
                     info_autointersecao=s["self_intersection"],
                     timestamp=ts,
+                    info_execucao=s.get("execucao"),
                 )
                 exportador.exportar_se_minimo_global(
                     nome_solido=solid_id,
@@ -441,6 +457,7 @@ def importar_pasta(
                     convexo=s["is_convex"],
                     tem_autointersecao=s["has_self_intersection"],
                     timestamp=ts,
+                    nome_base_exato=gerenciador.ultimo_nome_base,
                 )
 
     total_new = cnt_new_conv_sem + cnt_new_nconv_sem

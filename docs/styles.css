@@ -1078,12 +1078,48 @@ code,
   cursor: not-allowed;
 }
 
+/* Resumo de frequência das classes isométricas */
+.iso-freq-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.iso-freq-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg-subtle);
+  color: var(--ink-secondary);
+}
+
+.iso-freq-chip.is-convex {
+  border-color: var(--convex-border);
+  background: var(--convex-soft);
+  color: var(--convex);
+}
+
+.iso-freq-chip.is-nonconvex {
+  border-color: var(--nonconvex-border);
+  background: var(--nonconvex-soft);
+  color: var(--nonconvex);
+}
+
 /* Faixa visual de TODOS os mínimos globais do sólido */
 .minima-visual-strip {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(225px, 1fr));
   gap: 10px;
   margin-bottom: 18px;
+  max-height: 224px;
+  overflow-y: auto;
+  padding-right: 2px;
 }
 
 .min-thumb-card {

@@ -193,48 +193,97 @@ class ValidadorCientifico:
 
         return {"is_equal": False, "matched_solution_id": None, "permutation": None}
 
+    def classificar_classes_isometricas(
+        self,
+        solutions: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """
+        Agrupa uma lista de mínimos globais válidos (sem autointerseção) em classes
+        de isometria métrica SEM descartar nenhum registro.
+        Anota cada solução in-place com:
+          - isometry_class (int, 1-based)
+          - is_canonical_in_class (bool)
+          - isometric_to (solution_id do representante canônico quando recorrente, ou None)
+        Retorna a lista resumida das classes distintas (com contagem e representante).
+        """
+        classes: List[Dict[str, Any]] = []
+
+        for sol in solutions:
+            verts = sol.get("vertices")
+            if not verts:
+                sol["isometry_class"] = 1
+                sol["is_canonical_in_class"] = True
+                sol["isometric_to"] = None
+                continue
+
+            mat = sol.get("_dist_matrix")
+            if mat is None:
+                mat = construir_matriz_distancias(verts)
+
+            matched_cls = None
+            for cls in classes:
+                if bool(cls["is_convex"]) != bool(sol.get("is_convex")):
+                    continue
+                if len(cls["_mat"]) != len(mat):
+                    continue
+                perm = resolver_isomorfismo(mat, cls["_mat"], tol=self.iso_tol, decimais=4)
+                if perm is not None:
+                    matched_cls = cls
+                    break
+
+            if matched_cls is None:
+                cid = len(classes) + 1
+                cls_obj = {
+                    "class_id": cid,
+                    "is_convex": bool(sol.get("is_convex")),
+                    "representative_id": sol.get("solution_id"),
+                    "representative_geom_hash": sol.get("geom_hash", ""),
+                    "count": 1,
+                    "_mat": mat,
+                }
+                classes.append(cls_obj)
+                sol["isometry_class"] = cid
+                sol["is_canonical_in_class"] = True
+                sol["isometric_to"] = None
+            else:
+                matched_cls["count"] += 1
+                sol["isometry_class"] = matched_cls["class_id"]
+                sol["is_canonical_in_class"] = False
+                sol["isometric_to"] = matched_cls["representative_id"]
+
+        return [
+            {k: v for k, v in cls.items() if k != "_mat"}
+            for cls in classes
+        ]
+
     def avaliar_novo_minimo_4_passos(
         self,
         solid_id: str,
         candidato: Dict[str, Any],
         solucoes_existentes_no_site: List[Dict[str, Any]],
+        permitir_isometricos: bool = True,
     ) -> Dict[str, Any]:
         """
-        Executa rigorosamente o protocolo de 4 passos do site quando um novo mínimo
-        aparece na pasta (ex.: pasta de Colli, Thomas ou Marcelo):
-          1. Novo mínimo detectado na pasta para `solid_id`.
-          2. Verifica se já existe um mínimo para esse sólido no site.
-          3. Se já existe, verifica se é igual (isomorfismo métrico via backtracking).
-          4. Se for igual, descarta. Se for novo, adiciona no site somente se cumprir
-             todas as exigências científicas já descritas anteriormente.
+        Avalia um mínimo global candidato para o catálogo:
+          1. Exige cumprimento rigoroso de todas as exigências científicas:
+             - Topologia ativa em faces.txt
+             - |F(x)| < 1e-6 (mínimo global)
+             - Sem degeneração e sem faces colineares
+             - Sem autointerseção de faces (convexo ou não convexo)
+          2. Verifica isomorfismo métrico contra os registros já presentes no catálogo.
+          3. Regra oficial atualizada (`permitir_isometricos=True`):
+             - Mínimos globais sem autointerseção (convexos ou não convexos) são SEMPRE
+               aceitos e preservados com sua condição inicial e metadados da amostra,
+               mesmo quando isométricos a outro mínimo já registrado (recebendo anotação
+               de recorrência isométrica).
+             - Apenas registros estritamente idênticos (mesmo arquivo/solution_id + geom_hash)
+               são tratados externamente como já indexados.
         """
         verts = candidato.get("vertices") or candidato.get("vc")
         faces = candidato.get("faces")
         ja_existe_no_site = len(solucoes_existentes_no_site) > 0
 
-        # Passo 2 e Passo 3: Se já existe mínimo para esse sólido no site, verifica se é igual
-        if ja_existe_no_site and verts is not None:
-            iso_res = self.verificar_igualdade_isometrica(verts, solucoes_existentes_no_site)
-            if iso_res["is_equal"]:
-                # Passo 4A: É igual -> descarta!
-                return {
-                    "accepted": False,
-                    "status": "descartado_igual",
-                    "step_1_new_in_folder": True,
-                    "step_2_exists_on_site": True,
-                    "step_3_is_equal": True,
-                    "step_4_decision": "descartar",
-                    "matched_solution_id": iso_res["matched_solution_id"],
-                    "permutation": iso_res["permutation"],
-                    "validation": None,
-                    "reason": (
-                        f"Descartado (Passo 4): já existe mínimo isométrico igual para '{solid_id}' "
-                        f"no site ({iso_res['matched_solution_id']})."
-                    ),
-                }
-
-        # Passo 4B: É novo (ou ainda não existia mínimo para esse sólido no site) ->
-        # precisa cumprir TODAS as exigências científicas já descritas anteriormente.
+        # 1. Validação científica obrigatória (rejeita locais, degenerados e autointerseção)
         check = self.validar_solucao_global(solid_id, verts if verts is not None else [], faces)
         if not check["valid"]:
             return {
@@ -246,20 +295,45 @@ class ValidadorCientifico:
                 "step_4_decision": "descartar_invalido",
                 "matched_solution_id": None,
                 "permutation": None,
+                "is_isometric_repeat": False,
                 "validation": check,
-                "reason": f"Descartado (Passo 4 - exigências científicas): {check['reason']}",
+                "reason": f"Rejeitado (exigências científicas): {check['reason']}",
             }
 
-        target_tab = "Resultados" if check["is_convex"] else "Descobertas"
+        # 2. Classificação isométrica contra mínimos existentes no site
+        iso_res = {"is_equal": False, "matched_solution_id": None, "permutation": None}
+        if ja_existe_no_site and verts is not None:
+            iso_res = self.verificar_igualdade_isometrica(verts, solucoes_existentes_no_site)
+            if iso_res["is_equal"] and not permitir_isometricos:
+                return {
+                    "accepted": False,
+                    "status": "descartado_igual",
+                    "step_1_new_in_folder": True,
+                    "step_2_exists_on_site": True,
+                    "step_3_is_equal": True,
+                    "step_4_decision": "descartar",
+                    "matched_solution_id": iso_res["matched_solution_id"],
+                    "permutation": iso_res["permutation"],
+                    "is_isometric_repeat": True,
+                    "validation": check,
+                    "reason": (
+                        f"Descartado: já existe mínimo isométrico igual para '{solid_id}' "
+                        f"({iso_res['matched_solution_id']})."
+                    ),
+                }
+
+        target_tab = "Convexo" if check["is_convex"] else "Não Convexo"
+        is_repeat = bool(iso_res["is_equal"])
         return {
             "accepted": True,
-            "status": "adicionado_novo",
+            "status": "adicionado_recorrencia" if is_repeat else "adicionado_novo",
             "step_1_new_in_folder": True,
             "step_2_exists_on_site": ja_existe_no_site,
-            "step_3_is_equal": False,
+            "step_3_is_equal": is_repeat,
             "step_4_decision": "adicionar_no_site",
-            "matched_solution_id": None,
-            "permutation": None,
+            "matched_solution_id": iso_res["matched_solution_id"],
+            "permutation": iso_res["permutation"],
+            "is_isometric_repeat": is_repeat,
             "validation": check,
             "fval_recomputed": check["fval_recomputed"],
             "is_convex": check["is_convex"],
@@ -270,8 +344,8 @@ class ValidadorCientifico:
             "self_intersection": check["self_intersection"],
             "faces_oriented": check["faces_oriented"],
             "reason": (
-                f"Adicionado ao site (Passo 4): novo mínimo inédito para '{solid_id}' validado "
-                f"cientificamente -> aba {target_tab}."
+                f"Adicionado ao catálogo: mínimo global ({target_tab}, sem autointerseção)"
+                + (f" — recorrência isométrica de {iso_res['matched_solution_id']}." if is_repeat else " — nova forma geométrica.")
             ),
         }
 

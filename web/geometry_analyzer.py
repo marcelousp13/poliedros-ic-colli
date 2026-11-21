@@ -377,9 +377,10 @@ def get_solid_metadata(name: str) -> Dict[str, Any]:
 
 def extract_execution_metadata(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """
-    Extrai e normaliza metadados técnicos da execução (condição inicial, método,
-    tamanho da amostra, tentativas necessárias, iterações e tempo) a partir do JSON.
-    Retorna None caso o registro seja de uma execução legada sem esses campos.
+    Extrai e normaliza todos os metadados técnicos da execução/iteração (condição inicial x0,
+    método, amostragem atual, tamanho da amostra, energia inicial, deslocamento, iterações,
+    tempo, norma do gradiente, parâmetros do otimizador, contadores de sessão e classe isométrica).
+    Retorna None caso o registro seja legado sem esses campos.
     """
     if not isinstance(data, dict):
         return None
@@ -394,22 +395,36 @@ def extract_execution_metadata(data: Dict[str, Any]) -> Optional[Dict[str, Any]]
                 return data[k]
         return None
 
+    sessao_id = pick("sessao_id", "session_id")
+    autor = pick("autor", "pesquisador")
     metodo = pick("metodo_inicial", "condicao_inicial_metodo", "metodo")
+    cod_metodo = pick("codigo_metodo_inicial")
     vc_ini = pick("vc_inicial", "condicao_inicial", "initial_vertices")
     amostra = pick("tamanho_amostra", "amostra", "sample_size")
-    tentativa = pick("tentativa", "tentativas", "tentativas_necessarias", "attempts")
+    amostra_atual = pick("amostra_atual", "tentativa", "tentativas", "tentativas_necessarias", "attempts")
+    tent_desde = pick("tentativas_desde_ultimo_global")
+    e_ini = pick("energia_inicial", "fval_inicial")
+    desl_med = pick("deslocamento_medio_vertices")
+    desl_max = pick("deslocamento_max_vertices")
     iters = pick("iteracoes_otimizador", "iteracoes", "iterations", "it")
     tempo = pick("tempo_segundos", "elapsed_time", "tempo")
     lado_l = pick("lado_L", "lado_l", "hipercubo_L")
+    escala_plano = pick("escala_plano")
     eps = pick("epsilon_perturbacao", "epsilon")
     norm_g = pick("norm_grad", "norm_g")
-    autor = pick("autor", "pesquisador")
     converged = pick("converged", "convergiu")
+    eh_ined = pick("eh_inedito_isometrico")
+    classe_iso = pick("classe_isometria_local")
+    params_otim = pick("parametros_otimizador")
+    cont_sessao = pick("contadores_sessao")
     ocorrencias = pick("ocorrencias")
 
     has_any = any(
         v is not None
-        for v in (metodo, vc_ini, amostra, tentativa, iters, tempo, lado_l, eps, autor, ocorrencias)
+        for v in (
+            sessao_id, autor, metodo, vc_ini, amostra, amostra_atual,
+            e_ini, iters, tempo, lado_l, eps, ocorrencias,
+        )
     )
     if not has_any:
         return None
@@ -417,35 +432,51 @@ def extract_execution_metadata(data: Dict[str, Any]) -> Optional[Dict[str, Any]]
     vc_ini_clean = None
     if isinstance(vc_ini, list) and vc_ini and isinstance(vc_ini[0], (list, tuple)) and len(vc_ini[0]) == 3:
         try:
-            vc_ini_clean = [[float(c) for c in row] for row in vc_ini]
+            vc_ini_clean = [[round(float(c), 8) for c in row] for row in vc_ini]
         except Exception:
             vc_ini_clean = None
 
-    return {
+    tent_int = int(amostra_atual) if isinstance(amostra_atual, (int, float)) else amostra_atual
+
+    out: Dict[str, Any] = {
+        "sessao_id": str(sessao_id) if sessao_id is not None else None,
+        "autor": str(autor) if autor else None,
         "metodo_inicial": str(metodo) if metodo is not None else None,
-        "lado_L": float(lado_l) if lado_l is not None else None,
+        "codigo_metodo_inicial": str(cod_metodo) if cod_metodo is not None else None,
+        "lado_L": round(float(lado_l), 6) if lado_l is not None else None,
+        "escala_plano": float(escala_plano) if escala_plano is not None else None,
         "epsilon_perturbacao": float(eps) if eps is not None else None,
         "tamanho_amostra": amostra,
-        "tentativa": int(tentativa) if isinstance(tentativa, (int, float)) else tentativa,
+        "amostra_atual": tent_int,
+        "tentativa": tent_int,
+        "tentativas_desde_ultimo_global": int(tent_desde) if isinstance(tent_desde, (int, float)) else None,
+        "energia_inicial": float(e_ini) if isinstance(e_ini, (int, float)) else None,
+        "deslocamento_medio_vertices": round(float(desl_med), 6) if isinstance(desl_med, (int, float)) else None,
+        "deslocamento_max_vertices": round(float(desl_max), 6) if isinstance(desl_max, (int, float)) else None,
         "iteracoes_otimizador": int(iters) if isinstance(iters, (int, float)) else None,
-        "tempo_segundos": float(tempo) if isinstance(tempo, (int, float)) else None,
+        "tempo_segundos": round(float(tempo), 4) if isinstance(tempo, (int, float)) else None,
         "norm_grad": float(norm_g) if isinstance(norm_g, (int, float)) else None,
         "converged": bool(converged) if converged is not None else None,
-        "autor": str(autor) if autor else None,
+        "eh_inedito_isometrico": bool(eh_ined) if eh_ined is not None else None,
+        "classe_isometria_local": int(classe_iso) if isinstance(classe_iso, (int, float)) else None,
+        "parametros_otimizador": params_otim if isinstance(params_otim, dict) else None,
+        "contadores_sessao": cont_sessao if isinstance(cont_sessao, dict) else None,
         "has_vc_inicial": vc_ini_clean is not None,
         "vc_inicial": vc_ini_clean,
         "ocorrencias": ocorrencias if isinstance(ocorrencias, list) else None,
     }
+    return {k: v for k, v in out.items() if v is not None or k in ("tamanho_amostra", "has_vc_inicial")}
 
 
 def compact_execution_metadata(exec_meta: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    """Versão compacta de `execucao` para o catálogo leve (omite a matriz `vc_inicial`)."""
+    """Versão compacta de `execucao` para o catálogo leve (omite `vc_inicial` e dicionários extensos)."""
     if not isinstance(exec_meta, dict):
         return None
+    skip = {"vc_inicial", "parametros_otimizador", "contadores_sessao", "ocorrencias"}
     return {
         k: v
         for k, v in exec_meta.items()
-        if k != "vc_inicial" and v is not None
+        if k not in skip and v is not None
     }
 
 
@@ -578,7 +609,7 @@ class CatalogService:
     e hash de conteúdo para altíssima performance (sub-milissegundo em leituras repetidas).
     """
 
-    ANALYSIS_CACHE_SCHEMA = "v3_catalog_execucao"
+    ANALYSIS_CACHE_SCHEMA = "v4_all_globals_execucao"
 
     def __init__(self, project_root: Path = PROJECT_ROOT):
         self.project_root = Path(project_root)

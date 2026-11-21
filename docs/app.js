@@ -316,9 +316,9 @@
       const discarded = info.discarded_solids || [];
       loadCatalog(true).then(() => {
         if (solids.length > 0) {
-          showToast(`Novo mínimo global absorvido: <strong>${esc(solids.join(", "))}</strong>`, "success", 4200);
+          showToast(`Novo mínimo global catalogado: <strong>${esc(solids.join(", "))}</strong>`, "success", 4200);
         } else if (discarded.length > 0) {
-          showToast(`Duplicata isométrica ignorada: <strong>${esc(discarded.join(", "))}</strong>`, "info", 3400);
+          showToast(`Registro ignorado (inválido ou com autointerseção): <strong>${esc(discarded.join(", "))}</strong>`, "info", 3400);
         } else if (info.pulled_count > 0) {
           showToast(`Catálogo atualizado com <strong>${info.pulled_count}</strong> novo(s) mínimo(s) da equipe`, "success", 4200);
         }
@@ -707,23 +707,42 @@
     state.modalDetail = null;
   }
 
+  function getAllModalSolutions(detail) {
+    if (!detail) return [];
+    if (Array.isArray(detail.global_solutions) && detail.global_solutions.length) {
+      return detail.global_solutions;
+    }
+    return [...(detail.convex_solutions || []), ...(detail.nonconvex_solutions || [])];
+  }
+
   function getFilteredModalSolutions(detail) {
-    const conv = detail.convex_solutions || [];
-    const nconv = detail.nonconvex_solutions || [];
-    if (state.modalClassFilter === "convex") return conv;
-    if (state.modalClassFilter === "nonconvex") return nconv;
-    return detail.global_solutions || [...conv, ...nconv];
+    const all = getAllModalSolutions(detail);
+    if (state.modalClassFilter === "convex") return all.filter((s) => Boolean(s.is_convex));
+    if (state.modalClassFilter === "nonconvex") return all.filter((s) => !s.is_convex);
+    if (state.modalClassFilter === "unique") return all.filter((s) => s.is_canonical_in_class !== false);
+    return all;
   }
 
   function formatRunSummary(sol) {
     const ex = sol?.execucao || null;
+    const isoCls = sol?.isometry_class ?? ex?.classe_isometria_local ?? null;
+    const isCanon = sol?.is_canonical_in_class !== false;
+    const isoLabel =
+      isoCls !== null
+        ? `Forma #${isoCls} · ${isCanon ? "Canônica" : "Recorrência"}`
+        : "Forma #1";
+
     if (!ex) {
       return {
         hasRunData: false,
         metodo: "Não registrado",
-        amostra: "Não registrado",
+        amostragem: "Não registrado",
         tentativa: "Não registrado",
+        energiaInicial: "Não registrado",
+        deslocamento: "Não registrado",
         convergencia: fmtDateShort(sol?.timestamp),
+        autorRegistro: fmtDateShort(sol?.timestamp),
+        isoLabel,
         hasInitialCoords: false,
         shortHint: fmtDateShort(sol?.timestamp),
       };
@@ -733,30 +752,61 @@
     if (ex.lado_L && metodoTxt.toLowerCase().includes("hipercubo")) {
       metodoTxt = `${metodoTxt} · L = ${Number(ex.lado_L).toFixed(3)}`;
     }
-    const amostraTxt =
-      ex.tamanho_amostra === null || ex.tamanho_amostra === undefined
-        ? ex.tentativa
-          ? "Ilimitada"
-          : "Não registrado"
-        : `${fmtInt(ex.tamanho_amostra)} amostras`;
+
+    const amostraAtual = ex.amostra_atual ?? ex.tentativa;
+    const tamAmostra = ex.tamanho_amostra;
+    let amostragemTxt = "Não registrado";
+    if (amostraAtual !== null && amostraAtual !== undefined) {
+      const tamLbl = tamAmostra === null || tamAmostra === undefined ? "ilimitada" : fmtInt(tamAmostra);
+      amostragemTxt = `Amostra #${fmtInt(amostraAtual)} / ${tamLbl}`;
+    } else if (tamAmostra !== null && tamAmostra !== undefined) {
+      amostragemTxt = `Tamanho: ${fmtInt(tamAmostra)}`;
+    }
+
     const tentativaTxt =
-      ex.tentativa !== null && ex.tentativa !== undefined
-        ? `Tentativa #${fmtInt(ex.tentativa)}`
+      amostraAtual !== null && amostraAtual !== undefined
+        ? ex.tentativas_desde_ultimo_global && ex.tentativas_desde_ultimo_global !== amostraAtual
+          ? `#${fmtInt(amostraAtual)} (+${fmtInt(ex.tentativas_desde_ultimo_global)} após ant.)`
+          : `Tentativa #${fmtInt(amostraAtual)}`
         : "Não registrado";
 
     const convParts = [];
     if (ex.iteracoes_otimizador) convParts.push(`${fmtInt(ex.iteracoes_otimizador)} it.`);
     if (ex.tempo_segundos !== null && ex.tempo_segundos !== undefined) convParts.push(`${Number(ex.tempo_segundos).toFixed(2)}s`);
+    if (ex.norm_grad !== null && ex.norm_grad !== undefined) convParts.push(`‖∇F‖ ${fmtSci(ex.norm_grad, 1)}`);
     const convTxt = convParts.length ? convParts.join(" · ") : fmtDateShort(sol?.timestamp);
 
-    const shortHint = ex.tentativa ? `Tent. #${ex.tentativa}` : fmtDateShort(sol?.timestamp);
+    const energiaIniTxt =
+      ex.energia_inicial !== null && ex.energia_inicial !== undefined
+        ? `${fmtSci(ex.energia_inicial, 2)} → ${fmtSci(sol?.fval, 1)}`
+        : "Não registrado";
+
+    const deslTxt =
+      ex.deslocamento_medio_vertices !== null && ex.deslocamento_medio_vertices !== undefined
+        ? `méd ${Number(ex.deslocamento_medio_vertices).toFixed(3)} · máx ${Number(ex.deslocamento_max_vertices ?? 0).toFixed(3)}`
+        : "Não registrado";
+
+    const autorParts = [];
+    if (ex.autor) autorParts.push(ex.autor);
+    const dt = fmtDateShort(sol?.timestamp);
+    if (dt !== "—") autorParts.push(dt);
+    const autorRegistro = autorParts.length ? autorParts.join(" · ") : "—";
+
+    const shortHint =
+      amostraAtual !== null && amostraAtual !== undefined
+        ? `Amostra #${amostraAtual}${tamAmostra ? `/${tamAmostra}` : ""}`
+        : fmtDateShort(sol?.timestamp);
 
     return {
       hasRunData: true,
       metodo: metodoTxt,
-      amostra: amostraTxt,
+      amostragem: amostragemTxt,
       tentativa: tentativaTxt,
+      energiaInicial: energiaIniTxt,
+      deslocamento: deslTxt,
       convergencia: convTxt,
+      autorRegistro,
+      isoLabel,
       hasInitialCoords: Boolean(ex.vc_inicial && ex.vc_inicial.length),
       shortHint,
     };
@@ -784,9 +834,11 @@
       .join("");
     $("#modal-meta-row").innerHTML = headerBadges;
 
-    const allSols = detail.global_solutions || [];
-    const convSols = detail.convex_solutions || [];
-    const nconvSols = detail.nonconvex_solutions || [];
+    const allSols = getAllModalSolutions(detail);
+    const convSols = allSols.filter((s) => Boolean(s.is_convex));
+    const nconvSols = allSols.filter((s) => !s.is_convex);
+    const isoClasses = detail.isometry_classes || [];
+    const hasRepeats = isoClasses.length > 0 && allSols.length > isoClasses.length;
 
     // Ficha limpa para sólido sem mínimo global ainda
     if (allSols.length === 0) {
@@ -826,33 +878,55 @@
     let activeSol = filteredSols.find((s) => s.solution_id === state.modalSolId) || filteredSols[0] || allSols[0];
     state.modalSolId = activeSol.solution_id;
 
-    // 1. Barra de separação Convexo vs Não Convexo (sem autointerseção) + Comparação
+    // 1. Barra de separação Convexo vs Não Convexo (sem autointerseção) + Formas distintas + Comparação
     const classBarHtml = `
       <div class="ficha-class-bar">
         <div class="ficha-filter-pills" role="tablist" aria-label="Separação de mínimos globais">
           <button type="button" class="pill ${state.modalClassFilter === "all" ? "active" : ""}" data-class-filter="all">
-            Todos os Globais (${allSols.length})
+            Todos (${allSols.length})
           </button>
           <button type="button" class="pill pill-convex ${state.modalClassFilter === "convex" ? "active" : ""}" data-class-filter="convex" ${convSols.length ? "" : "disabled"}>
-            Globais Convexos (${convSols.length})
+            Convexos (${convSols.length})
           </button>
           <button type="button" class="pill pill-nonconvex ${state.modalClassFilter === "nonconvex" ? "active" : ""}" data-class-filter="nonconvex" ${nconvSols.length ? "" : "disabled"}>
-            Globais Não Convexos · sem autointerseção (${nconvSols.length})
+            Não Convexos · sem autointerseção (${nconvSols.length})
           </button>
+          ${
+            hasRepeats
+              ? `<button type="button" class="pill ${state.modalClassFilter === "unique" ? "active" : ""}" data-class-filter="unique">
+                   Formas distintas (${isoClasses.length})
+                 </button>`
+              : ""
+          }
         </div>
         ${
           filteredSols.length > 1
             ? `<button type="button" class="btn btn-sm ${state.modalCompareMode ? "btn-primary" : "btn-secondary"}" id="btn-toggle-compare">
-                ${state.modalCompareMode ? "Voltar ao inspetor" : `Comparar lado a lado (${filteredSols.length})`}
+                ${state.modalCompareMode ? "Voltar ao inspetor" : `Comparar lado a lado (${Math.min(filteredSols.length, 6)})`}
                </button>`
             : ""
         }
       </div>
+      ${
+        isoClasses.length > 0 && allSols.length > 1
+          ? `<div class="iso-freq-bar">
+               ${isoClasses
+                 .map((cls) => {
+                   const pct = ((cls.count / allSols.length) * 100).toFixed(1);
+                   return `<span class="iso-freq-chip ${cls.is_convex ? "is-convex" : "is-nonconvex"}">
+                     Forma #${cls.class_id} (${cls.is_convex ? "Convexo" : "Não convexo"}): <strong>${cls.count}</strong> · ${pct}%
+                   </span>`;
+                 })
+                 .join("")}
+             </div>`
+          : ""
+      }
     `;
 
     // 2. Modo Comparação Lado a Lado (útil para reuniões com Prof. Colli, ex.: J86 convexo vs não convexo)
     if (state.modalCompareMode && filteredSols.length > 1) {
       const compareCards = filteredSols
+        .slice(0, 6)
         .map((s, idx) => {
           const c = s.convexity || {};
           const run = formatRunSummary(s);
@@ -860,7 +934,7 @@
           return `
             <div class="compare-card ${s.is_convex ? "" : "is-nonconvex"}">
               <div class="compare-card-head">
-                <span class="mono" style="font-size:0.78rem;font-weight:600;">Mínimo #${idx + 1}</span>
+                <span class="mono" style="font-size:0.78rem;font-weight:600;">Mínimo #${idx + 1} · ${esc(run.isoLabel)}</span>
                 <span class="badge ${s.is_convex ? "badge-convex" : "badge-nonconvex"}">
                   ${s.is_convex ? "Convexo" : "Não convexo · sem autointerseção"}
                 </span>
@@ -883,8 +957,8 @@
                     <div class="metric-cell-val">${Number(c.min_dihedral_deg ?? 0).toFixed(1)}° – ${Number(c.max_dihedral_deg ?? 0).toFixed(1)}°</div>
                   </div>
                   <div class="metric-cell">
-                    <div class="metric-cell-label">Tentativa / Amostra</div>
-                    <div class="metric-cell-val ${run.hasRunData ? "" : "is-unrecorded"}">${esc(run.tentativa)}</div>
+                    <div class="metric-cell-label">Amostragem</div>
+                    <div class="metric-cell-val ${run.hasRunData ? "" : "is-unrecorded"}">${esc(run.amostragem)}</div>
                   </div>
                 </div>
                 <div style="display:flex;gap:6px;">
@@ -926,16 +1000,17 @@
             const c = s.convexity || {};
             const run = formatRunSummary(s);
             const thumbUrl = getRenderUrl(detail, s, "iso", state.modalShowDiagonals, true);
+            const formTag = s.isometry_class ? `F${s.isometry_class}` : "";
             return `
               <button type="button" class="min-thumb-card ${isSel ? "is-selected" : ""} ${s.is_convex ? "" : "is-nonconvex"}" data-select-sol="${esc(s.solution_id)}">
-                <img class="min-thumb-img" src="${esc(thumbUrl)}" alt="${esc(detail.display_code)} mínimo #${idx + 1}" width="58" height="58" />
+                <img class="min-thumb-img" src="${esc(thumbUrl)}" alt="${esc(detail.display_code)} mínimo #${idx + 1}" width="58" height="58" loading="lazy" decoding="async" />
                 <div class="min-thumb-info">
                   <div class="min-thumb-title">
-                    <span class="mono">#${idx + 1}</span>
+                    <span class="mono">#${idx + 1}${formTag ? ` · ${formTag}` : ""}</span>
                     <span class="badge ${s.is_convex ? "badge-convex" : "badge-nonconvex"}">${s.is_convex ? "Convexo" : "Não convexo"}</span>
                   </div>
-                  <div class="min-thumb-meta">F(x) ${fmtSci(s.fval, 1)} · θ≤${Number(c.max_dihedral_deg ?? 0).toFixed(1)}°</div>
-                  <div class="min-thumb-meta">V/V_CH ${Number(c.volume_ratio ?? 1).toFixed(3)} · ${esc(run.shortHint)}</div>
+                  <div class="min-thumb-meta">${esc(run.shortHint)} · θ≤${Number(c.max_dihedral_deg ?? 0).toFixed(1)}°</div>
+                  <div class="min-thumb-meta">F(x) ${fmtSci(s.fval, 1)} · V/V_CH ${Number(c.volume_ratio ?? 1).toFixed(3)}</div>
                 </div>
               </button>
             `;
@@ -1049,25 +1124,33 @@
 
           <div class="dossier-section">
             <div class="section-label">
-              <span>Informações Técnicas da Busca</span>
+              <span>Informações Técnicas da Iteração &amp; Busca</span>
               ${run.hasInitialCoords ? `<button type="button" class="btn-tiny" id="btn-jump-ci">Ver x₀</button>` : ""}
             </div>
             <div class="tech-grid">
               <div class="metric-cell ${run.hasRunData ? "is-highlight" : ""}">
-                <div class="metric-cell-label">Condição Inicial</div>
+                <div class="metric-cell-label">Condição Inicial (Método)</div>
                 <div class="metric-cell-val ${run.hasRunData ? "" : "is-unrecorded"}">${esc(run.metodo)}</div>
               </div>
               <div class="metric-cell">
-                <div class="metric-cell-label">Tamanho da Amostra</div>
-                <div class="metric-cell-val ${run.hasRunData ? "" : "is-unrecorded"}">${esc(run.amostra)}</div>
+                <div class="metric-cell-label">Amostragem (Atual / Tamanho)</div>
+                <div class="metric-cell-val ${run.hasRunData ? "" : "is-unrecorded"}">${esc(run.amostragem)}</div>
               </div>
               <div class="metric-cell">
-                <div class="metric-cell-label">Tentativas Necessárias</div>
-                <div class="metric-cell-val ${run.hasRunData ? "" : "is-unrecorded"}">${esc(run.tentativa)}</div>
+                <div class="metric-cell-label">Convergência (Iterações · Tempo)</div>
+                <div class="metric-cell-val ${run.hasRunData ? "" : "is-unrecorded"}">${esc(run.convergencia)}</div>
               </div>
               <div class="metric-cell">
-                <div class="metric-cell-label">${run.hasRunData ? "Convergência" : "Data do Registro"}</div>
-                <div class="metric-cell-val">${esc(run.convergencia)}</div>
+                <div class="metric-cell-label">Energia F(x₀) → F(x*)</div>
+                <div class="metric-cell-val ${run.hasRunData ? "" : "is-unrecorded"}">${esc(run.energiaInicial)}</div>
+              </div>
+              <div class="metric-cell">
+                <div class="metric-cell-label">Classe Isométrica</div>
+                <div class="metric-cell-val">${esc(run.isoLabel)}</div>
+              </div>
+              <div class="metric-cell">
+                <div class="metric-cell-label">Pesquisador / Registro</div>
+                <div class="metric-cell-val">${esc(run.autorRegistro)}</div>
               </div>
             </div>
           </div>
@@ -1264,18 +1347,34 @@
         .join("\n");
     }
     if (tab === "initial") {
-      const ci = sol.execucao?.vc_inicial;
+      const ex = sol.execucao || {};
+      const ci = ex.vc_inicial;
       if (Array.isArray(ci) && ci.length > 0) {
-        const header = [
-          `# Método: ${sol.execucao.metodo_inicial || "—"}`,
-          `# Amostra: ${sol.execucao.tamanho_amostra ?? "Ilimitada"} | Tentativa: #${sol.execucao.tentativa ?? "—"}`,
-        ].join("\n");
-        const coords = ci
-          .map((v, i) => `x0[${String(i).padStart(2, "0")}] = (${Number(v[0]).toFixed(8)}, ${Number(v[1]).toFixed(8)}, ${Number(v[2]).toFixed(8)})`)
-          .join("\n");
-        return `${header}\n${coords}`;
+        const lines = [
+          `# Método: ${ex.metodo_inicial || "—"}` + (ex.lado_L ? ` | L = ${ex.lado_L}` : "") + (ex.epsilon_perturbacao !== undefined && ex.epsilon_perturbacao !== null ? ` | ε = ${ex.epsilon_perturbacao}` : ""),
+          `# Amostra atual: #${ex.amostra_atual ?? ex.tentativa ?? "—"} / Tamanho: ${ex.tamanho_amostra ?? "Ilimitada"}` + (ex.tentativas_desde_ultimo_global ? ` | Desde último global: ${ex.tentativas_desde_ultimo_global}` : ""),
+        ];
+        if (ex.energia_inicial !== undefined && ex.energia_inicial !== null) {
+          lines.push(`# F(x₀) = ${fmtSci(ex.energia_inicial, 4)} -> F(x*) = ${fmtSci(sol.fval, 4)}` + (ex.deslocamento_medio_vertices !== undefined ? ` | Δv méd=${ex.deslocamento_medio_vertices} (máx=${ex.deslocamento_max_vertices})` : ""));
+        }
+        if (ex.sessao_id || ex.autor) {
+          lines.push(`# Sessão: ${ex.sessao_id || "—"} | Autor: ${ex.autor || "—"}`);
+        }
+        if (ex.parametros_otimizador) {
+          const p = ex.parametros_otimizador;
+          lines.push(`# Otimizador: alpha=${p.alpha}, beta=${p.amortecimento}, grad_tol=${p.grad_tol}, max_step=${p.max_step}`);
+        }
+        if (ex.contadores_sessao) {
+          const cs = ex.contadores_sessao;
+          lines.push(`# Sessão até aqui: globais_conv=${cs.globais_convexos_limpos ?? 0}, globais_nconv=${cs.globais_nao_convexos_limpos ?? 0}, intersecao=${cs.globais_com_intersecao ?? 0}, locais=${cs.locais ?? 0}, degen=${cs.degenerados ?? 0}`);
+        }
+        lines.push("");
+        ci.forEach((v, i) => {
+          lines.push(`x0[${String(i).padStart(2, "0")}] = (${Number(v[0]).toFixed(8)}, ${Number(v[1]).toFixed(8)}, ${Number(v[2]).toFixed(8)})`);
+        });
+        return lines.join("\n");
       }
-      return "Condição inicial não registrada nesta execução anterior.\nAs novas execuções de standbyalone2.py gravam automaticamente x₀, método, tamanho da amostra e nº de tentativas.";
+      return "Condição inicial não registrada nesta execução anterior.\nAs novas execuções de standbyalone2.py gravam automaticamente x₀, amostra atual, tamanho da amostra, energia inicial, iterações e tempo.";
     }
     if (tab === "dihedrals") {
       const list = sol.convexity?.interior_dihedrals_deg || sol.angulos_salvos || [];
@@ -1310,15 +1409,15 @@
       <div class="sync-steps">
         <div class="sync-step">
           <div class="sync-step-title">1. Critério de catalogação</div>
-          <div>Todo mínimo global <strong>sem autointerseção de faces</strong> (<code>|F(x)| &lt; 10⁻⁶</code>), seja <strong>convexo</strong> ou <strong>não convexo</strong>, integra a ficha unificada do sólido com sua construção visual e dados técnicos.</div>
+          <div>Todos os mínimos globais <strong>sem autointerseção de faces</strong> (<code>|F(x)| &lt; 10⁻⁶</code>), <strong>convexos ou não convexos</strong> — incluindo recorrências isométricas — integram a ficha do sólido com construção visual PythonSCAD, 3D e estatísticas. Mínimos locais e com autointerseção permanecem apenas no registro local.</div>
         </div>
         <div class="sync-step">
           <div class="sync-step-title">2. Execução automática da equipe</div>
-          <div>Ao rodar <code>standbyalone2.py</code>, novos mínimos globais inéditos registram condição inicial (<code>x₀</code>), método, tamanho da amostra e tentativa, sendo enviados ao repositório via Cloudflare Worker.</div>
+          <div>Ao rodar <code>standbyalone2.py</code>, cada mínimo global limpo registra condição inicial (<code>x₀</code>), método, amostra atual, tamanho da amostra, energia inicial, iterações e tempo, sendo enviado em lotes ao repositório via Cloudflare Worker.</div>
         </div>
         <div class="sync-step">
           <div class="sync-step-title">3. Otimização de desempenho</div>
-          <div>Miniaturas WebP leves (~15 KB), carregamento sob demanda das fichas individuais e visualizador 3D nativo em Canvas sem dependências externas.</div>
+          <div>Miniaturas WebP leves, renderização enxuta para recorrências isométricas, carregamento sob demanda das fichas individuais e visualizador 3D nativo em Canvas.</div>
         </div>
       </div>
     `;

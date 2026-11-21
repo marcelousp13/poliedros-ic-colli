@@ -206,28 +206,31 @@ class VerifiedCatalogService:
             if item["global_count"] > 0 or has_site_baseline:
                 detail = self.get_solid_detail(sid)
                 if detail:
-                    conv_list = [_compact_from_detail(s) for s in detail["convex_solutions"]]
-                    nconv_list = [_compact_from_detail(s) for s in detail["nonconvex_solutions"]]
+                    all_detail = detail.get("global_solutions") or []
+                    conv_list = [_compact_from_detail(s) for s in all_detail if s.get("source_folder") == "convexos"]
+                    nconv_list = [_compact_from_detail(s) for s in all_detail if s.get("source_folder") != "convexos"]
                     all_list = conv_list + nconv_list
                     primary_any = conv_list[0] if conv_list else (nconv_list[0] if nconv_list else None)
+                    iso_classes = detail.get("isometry_classes") or []
 
-                    item["convex_solutions"] = conv_list
-                    item["nonconvex_solutions"] = nconv_list
-                    item["global_solutions"] = all_list
                     item["convex_count"] = len(conv_list)
                     item["nonconvex_count"] = len(nconv_list)
                     item["global_count"] = len(all_list)
+                    item["unique_geometry_count"] = len(iso_classes) or len(all_list)
+                    item["unique_convex_count"] = sum(1 for c in iso_classes if c.get("is_convex"))
+                    item["unique_nonconvex_count"] = sum(1 for c in iso_classes if not c.get("is_convex"))
                     item["has_convex_global"] = bool(conv_list)
                     item["has_nonconvex_global"] = bool(nconv_list)
                     item["has_global"] = bool(all_list)
-                    item["primary_convex"] = conv_list[0] if conv_list else None
                     item["primary_global"] = primary_any
-                    item["primary_nonconvex"] = nconv_list[0] if nconv_list else None
+                    item.pop("convex_solutions", None)
+                    item.pop("nonconvex_solutions", None)
+                    item.pop("global_solutions", None)
 
-                for s in item["global_solutions"]:
-                    gh = s.get("geom_hash")
-                    if gh:
-                        new_geom_index[(sid, s["solution_id"])] = gh
+                    for s in all_list:
+                        gh = s.get("geom_hash")
+                        if gh:
+                            new_geom_index[(sid, s["solution_id"])] = gh
 
             total_globals += item["global_count"]
             total_convex += item["convex_count"]
@@ -273,14 +276,16 @@ class VerifiedCatalogService:
             sol_id = cand["solution_id"]
             gh = cand.get("geom_hash", "")
             if sol_id in existing_ids and existing_ids[sol_id].get("geom_hash") == gh:
-                if cand.get("execucao") and not existing_ids[sol_id].get("execucao"):
+                if cand.get("execucao"):
                     existing_ids[sol_id]["execucao"] = cand["execucao"]
                 continue
 
             if not detail.get("has_topology"):
                 continue
 
-            avaliacao = self.validador.avaliar_novo_minimo_4_passos(solid_id, cand, site_solutions)
+            avaliacao = self.validador.avaliar_novo_minimo_4_passos(
+                solid_id, cand, site_solutions, permitir_isometricos=True
+            )
             if not avaliacao["accepted"]:
                 continue
 
@@ -296,22 +301,33 @@ class VerifiedCatalogService:
             cand_copy["has_self_intersection"] = False
             cand_copy["faces"] = avaliacao["faces_oriented"]
             if cand_copy["solution_id"] in existing_ids:
-                cand_copy["solution_id"] = f"{cand_copy['solution_id']}_{gh[:6]}"
+                base_dis = f"{cand_copy['solution_id']}_{gh[:6]}"
+                cand_dis = base_dis
+                idx_d = 2
+                while cand_dis in existing_ids:
+                    cand_dis = f"{base_dis}_{idx_d}"
+                    idx_d += 1
+                cand_copy["solution_id"] = cand_dis
             cand_copy["already_on_site"] = True
             cand_copy["_dist_matrix"] = construir_matriz_distancias(cand_copy["vertices"])
             site_solutions.append(cand_copy)
             existing_ids[cand_copy["solution_id"]] = cand_copy
 
+        conv_raw = [s for s in site_solutions if s.get("source_folder") == "convexos"]
+        nconv_raw = [s for s in site_solutions if s.get("source_folder") != "convexos"]
+        conv_raw.sort(key=lambda s: (s["fval"], s["timestamp"], s["solution_id"]))
+        nconv_raw.sort(key=lambda s: (s["fval"], s["timestamp"], s["solution_id"]))
+        ordered_raw = conv_raw + nconv_raw
+        iso_classes = self.validador.classificar_classes_isometricas(ordered_raw)
+
         def _strip_internal(s: Dict[str, Any]) -> Dict[str, Any]:
             return {k: v for k, v in s.items() if k not in ("_dist_matrix", "already_on_site")}
 
-        conv = [_strip_internal(s) for s in site_solutions if s.get("source_folder") == "convexos"]
-        nconv = [_strip_internal(s) for s in site_solutions if s.get("source_folder") != "convexos"]
-        conv.sort(key=lambda s: (s["fval"], s["timestamp"]))
-        nconv.sort(key=lambda s: (s["fval"], s["timestamp"]))
-        detail["convex_solutions"] = conv
-        detail["nonconvex_solutions"] = nconv
-        detail["global_solutions"] = conv + nconv
+        all_clean = [_strip_internal(s) for s in ordered_raw]
+        detail["isometry_classes"] = iso_classes
+        detail["global_solutions"] = all_clean
+        detail.pop("convex_solutions", None)
+        detail.pop("nonconvex_solutions", None)
 
         with self._lock:
             self._detail_obj_cache[solid_id] = detail
@@ -347,12 +363,12 @@ class VerifiedCatalogService:
                     if not item.get("has_global"):
                         continue
                     sid = item["id"]
-                    for sol in item.get("global_solutions", []):
+                    sol = item.get("primary_global")
+                    if sol:
                         sol_id = sol["solution_id"]
                         gh = sol.get("geom_hash")
-                        if renderer._find_docs_render(sid, "iso", gh) is not None:
-                            # Carrega os bytes PNG do ângulo principal em RAM (~60 KB cada) para entrega <1ms
-                            renderer.get_png_bytes(sid, sol_id, None, preset="iso", geom_hash=gh)
+                        if renderer._find_docs_render(sid, "iso", gh, thumb=True) is not None:
+                            renderer.get_image_bytes(sid, sol_id, None, preset="iso", geom_hash=gh, thumb=True)
                         else:
                             files = self.base.find_solution_files(sid, sol_id)
                             if files and files.get("scad"):
