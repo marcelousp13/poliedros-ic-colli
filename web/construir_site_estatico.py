@@ -628,17 +628,24 @@ def build_static_atlas(
             if old_af.is_file() and old_af.name not in valid_asset_names:
                 old_af.unlink(missing_ok=True)
 
-    # Copia frontend (ajustando rotas de /static/ para relativas ./ para funcionar em qualquer subcaminho do GitHub Pages)
+    # Copia frontend (ajustando rotas de /static/ para relativas ./ + cache-busting por hash)
+    css_bytes = (STATIC_DIR / "styles.css").read_bytes()
+    js_bytes = (STATIC_DIR / "app.js").read_bytes()
+    css_ver = hashlib.sha1(css_bytes).hexdigest()[:8]
+    js_ver = hashlib.sha1(js_bytes).hexdigest()[:8]
+
     html_src = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
     html_static = (
         html_src
         .replace("<body>", '<body data-atlas-mode="static">', 1)
+        .replace('href="/static/styles.css"', f'href="./styles.css?v={css_ver}"')
+        .replace('src="/static/app.js"', f'src="./app.js?v={js_ver}"')
         .replace('href="/static/', 'href="./')
         .replace('src="/static/', 'src="./')
     )
     (output_dir / "index.html").write_text(html_static, encoding="utf-8")
-    shutil.copy2(STATIC_DIR / "styles.css", output_dir / "styles.css")
-    shutil.copy2(STATIC_DIR / "app.js", output_dir / "app.js")
+    (output_dir / "styles.css").write_bytes(css_bytes)
+    (output_dir / "app.js").write_bytes(js_bytes)
     (output_dir / ".nojekyll").write_text("", encoding="utf-8")
 
     print("-" * 68)
