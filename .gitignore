@@ -1,0 +1,15 @@
+# Segredos locais (NUNCA publicar token do GitHub)
+web/config_github.json
+
+# Caches locais e artefatos temporários
+web/cache/
+__pycache__/
+*.py[cod]
+*.log
+
+# Arquivos pesados / extrações legadas locais
+*.rar
+*.zip
+*.blend
+*.blend1
+gerador_solidos_extracted/
