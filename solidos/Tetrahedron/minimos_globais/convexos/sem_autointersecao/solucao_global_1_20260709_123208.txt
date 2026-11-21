@@ -1,0 +1,30 @@
+Solução: solucao_global_1
+Tipo: global
+Classificação geométrica: Convexo (Sem autointerseção de faces)
+Valor da função objetivo (fval): 1.099475e-29
+Volume / Volume Envoltória Convexa: 0.117851 / 0.117851 (razão = 1.000000)
+Diedrais internos: [70.529°, 70.529°] | Arestas reflexas: 0 | Vértices interiores: 0
+Autointerseção de faces: NÃO (ocorrências: 0)
+Autovalores: [-2.9167914325182127e-06, -1.685049659517196e-06, -9.723297578789731e-07, 9.80240817524335e-07, 2.174763943992373e-06, 4.134099589775581e-06, 3.9999998037786404, 4.000001251430526, 7.999995428037119, 7.999997756735263, 8.000005541610205, 15.999998505307627]
+
+--- Distâncias Mútuas ---
+1.000000
+1.000000
+1.000000
+1.000000
+1.000000
+1.000000
+
+--- Ângulos Diedrais (graus) ---
+109.4712
+109.4712
+109.4712
+109.4712
+109.4712
+109.4712
+
+--- Coordenadas dos Vértices (vc) ---
+[-0.53028641, -0.17049769, 0.36497500]
+[0.24176047, 0.38439416, 0.05507395]
+[-0.54934186, 0.25066103, -0.54181176]
+[-0.63062805, 0.82046361, 0.27593977]

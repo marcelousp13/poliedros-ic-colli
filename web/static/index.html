@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Poliedros — IME-USP · IC com Colli</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400&display=swap" rel="stylesheet" media="print" onload="this.media='all'" />
+  <noscript><link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400&display=swap" rel="stylesheet" /></noscript>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <!-- CABEÇALHO MINIMALISTA -->
+  <header class="topbar">
+    <div class="topbar-inner">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <polygon points="16,3 28,10 28,22 16,29 4,22 4,10" stroke="currentColor" stroke-width="1.4" fill="#F8FAFC"/>
+            <polygon points="16,3 28,10 16,17 4,10" stroke="currentColor" stroke-width="1.15" fill="#EFF6FF"/>
+            <line x1="16" y1="17" x2="16" y2="29" stroke="currentColor" stroke-width="1.15"/>
+            <line x1="16" y1="17" x2="28" y2="22" stroke="currentColor" stroke-width="0.85" stroke-dasharray="2 2"/>
+            <line x1="16" y1="17" x2="4" y2="22" stroke="currentColor" stroke-width="0.85" stroke-dasharray="2 2"/>
+          </svg>
+        </div>
+        <div class="brand-text">
+          <span class="brand-title">Poliedros</span>
+          <span class="brand-sep">·</span>
+          <span class="brand-sub">IME-USP</span>
+        </div>
+      </div>
+
+      <nav class="tabs" role="tablist" aria-label="Atlas">
+        <button class="tab-btn active" data-tab="resultados" role="tab" aria-selected="true">
+          <span>Resultados</span>
+          <span class="tab-badge" id="badge-resultados">0</span>
+        </button>
+        <button class="tab-btn" data-tab="descobertas" role="tab" aria-selected="false">
+          <span>Descobertas</span>
+          <span class="tab-badge tab-badge-discovery" id="badge-descobertas">0</span>
+        </button>
+      </nav>
+
+      <div class="topbar-actions">
+        <button class="live-pill" id="btn-sync-info" title="Sincronização automática com o GitHub">
+          <span class="live-dot"></span>
+          <span id="live-status-text">Atlas</span>
+        </button>
+        <button class="btn btn-secondary btn-sm hidden" id="btn-push-github" title="Enviar mínimos globais novos ao GitHub">
+          Enviar ao GitHub
+        </button>
+        <button class="icon-btn" id="btn-reload-catalog" title="Atualizar catálogo">
+          <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.65">
+            <path d="M16.5 10a6.5 6.5 0 1 1-1.9-4.6M16.5 3.5v3.2h-3.2" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <main class="main-shell">
+    <!-- ====================================================================== -->
+    <!-- ABA 1: RESULTADOS                                                      -->
+    <!-- ====================================================================== -->
+    <section class="tab-panel active" id="panel-resultados" role="tabpanel">
+      <div class="page-header">
+        <div class="page-header-left">
+          <h1 class="page-title">Resultados</h1>
+          <span class="header-meta mono">Convexos · sem autointerseção · F(x) &lt; 10⁻⁶</span>
+        </div>
+        <div class="stat-bar" id="resultados-kpis"></div>
+      </div>
+
+      <div class="toolbar">
+        <div class="search-wrap">
+          <svg class="search-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.65">
+            <circle cx="9" cy="9" r="6"/><path d="m14 14 3.5 3.5" stroke-linecap="round"/>
+          </svg>
+          <input type="search" id="res-search" class="search-input" placeholder="Buscar sólido…" />
+        </div>
+
+        <div class="filter-group" id="res-family-filters">
+          <button class="pill active" data-family="all">Todos</button>
+          <button class="pill" data-family="Platônicos">Platônicos</button>
+          <button class="pill" data-family="Arquimedianos">Arquimedianos</button>
+          <button class="pill" data-family="Prismas e Antiprismas">Prismas</button>
+          <button class="pill" data-family="Sólidos de Johnson">Johnson</button>
+        </div>
+
+        <div class="toolbar-right">
+          <select id="res-status-filter" class="select-clean" aria-label="Situação">
+            <option value="all">Todos</option>
+            <option value="solved">Com foto</option>
+            <option value="unsolved">Sem foto</option>
+            <option value="active">Ativos</option>
+            <option value="pending">Pendentes</option>
+          </select>
+
+          <select id="res-sort" class="select-clean" aria-label="Ordenação">
+            <option value="canonical">Canônica</option>
+            <option value="vertices">Vértices</option>
+          </select>
+
+          <div class="view-toggle" role="group" aria-label="Visualização">
+            <button class="view-btn active" data-view="grid" data-target="res">Grade</button>
+            <button class="view-btn" data-view="table" data-target="res">Tabela</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="results-meta-bar" id="res-meta-bar"></div>
+      <div class="atlas-sections" id="res-grid"></div>
+      <div class="atlas-table-wrap hidden" id="res-table-wrap"></div>
+    </section>
+
+    <!-- ====================================================================== -->
+    <!-- ABA 2: DESCOBERTAS                                                     -->
+    <!-- ====================================================================== -->
+    <section class="tab-panel" id="panel-descobertas" role="tabpanel">
+      <div class="page-header">
+        <div class="page-header-left">
+          <h1 class="page-title">Descobertas</h1>
+          <span class="header-meta header-meta-discovery mono">Não convexos · sem autointerseção · F(x) &lt; 10⁻⁶</span>
+        </div>
+        <div class="stat-bar" id="descobertas-kpis"></div>
+      </div>
+
+      <div class="toolbar">
+        <div class="search-wrap">
+          <svg class="search-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.65">
+            <circle cx="9" cy="9" r="6"/><path d="m14 14 3.5 3.5" stroke-linecap="round"/>
+          </svg>
+          <input type="search" id="disc-search" class="search-input" placeholder="Buscar sólido…" />
+        </div>
+
+        <div class="filter-group" id="disc-family-filters">
+          <button class="pill active" data-family="all">Todos</button>
+          <button class="pill" data-family="Platônicos">Platônicos</button>
+          <button class="pill" data-family="Arquimedianos">Arquimedianos</button>
+          <button class="pill" data-family="Prismas e Antiprismas">Prismas</button>
+          <button class="pill" data-family="Sólidos de Johnson">Johnson</button>
+        </div>
+
+        <div class="toolbar-right">
+          <select id="disc-status-filter" class="select-clean" aria-label="Situação">
+            <option value="all">Todos</option>
+            <option value="discovered">Encontrados</option>
+            <option value="undiscovered">Sem descoberta</option>
+          </select>
+
+          <select id="disc-sort" class="select-clean" aria-label="Ordenação">
+            <option value="canonical">Canônica</option>
+            <option value="vertices">Vértices</option>
+          </select>
+
+          <div class="view-toggle" role="group" aria-label="Visualização">
+            <button class="view-btn active" data-view="grid" data-target="disc">Grade</button>
+            <button class="view-btn" data-view="table" data-target="disc">Tabela</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="results-meta-bar" id="disc-meta-bar"></div>
+      <div class="atlas-sections" id="disc-grid"></div>
+      <div class="atlas-table-wrap hidden" id="disc-table-wrap"></div>
+    </section>
+  </main>
+
+  <!-- MODAL DOSSIÊ CIENTÍFICO -->
+  <div class="modal-backdrop hidden" id="solid-modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+    <div class="modal-sheet">
+      <div class="modal-header">
+        <div class="modal-title-group">
+          <span class="modal-code mono" id="modal-eyebrow">—</span>
+          <h2 class="modal-title" id="modal-title">—</h2>
+          <span class="modal-sub-en" id="modal-sub-en"></span>
+        </div>
+        <button class="icon-btn" id="modal-close" aria-label="Fechar">
+          <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.75">
+            <path d="M5 5l10 10M15 5 5 15" stroke-linecap="round"/>
+          </svg>
+        </button>
+      </div>
+      <div class="modal-body" id="modal-body"></div>
+    </div>
+  </div>
+
+  <!-- MODAL DISCRETO DE SINCRONIZAÇÃO AUTOMÁTICA -->
+  <div class="modal-backdrop hidden" id="sync-modal" role="dialog" aria-modal="true" aria-labelledby="sync-modal-title">
+    <div class="modal-sheet modal-sheet-sm">
+      <div class="modal-header">
+        <h2 class="modal-title" id="sync-modal-title" style="font-size:1.25rem;">Absorção Automática</h2>
+        <button class="icon-btn" id="sync-modal-close" aria-label="Fechar">
+          <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.75">
+            <path d="M5 5l10 10M15 5 5 15" stroke-linecap="round"/>
+          </svg>
+        </button>
+      </div>
+      <div class="modal-body" id="sync-modal-body"></div>
+    </div>
+  </div>
+
+  <div class="toast-stack" id="toast-stack" aria-live="polite"></div>
+
+  <footer class="footer">
+    <div class="footer-inner">
+      <span>IME-USP · Iniciação Científica · Prof. Eduardo Colli</span>
+      <span>Marcelo Germano Reis · Thomas Louzada Santesso</span>
+    </div>
+  </footer>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
