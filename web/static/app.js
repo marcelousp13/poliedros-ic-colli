@@ -258,10 +258,15 @@
     const totalNonConvex = summary.total_nonconvex_solutions ?? 0;
 
     $("#catalog-kpis").innerHTML = `
-      <span class="stat-item"><span class="stat-val is-accent">${solvedSolids}</span><span class="stat-lbl">/ ${totalSolids} sólidos</span></span>
+      <span class="stat-item"><span class="stat-val">${solvedSolids}</span><span class="stat-lbl">/ ${totalSolids} sólidos</span></span>
+      <span class="stat-sep" aria-hidden="true">·</span>
       <span class="stat-item"><span class="stat-val">${totalGlobals}</span><span class="stat-lbl">mínimos globais</span></span>
-      <span class="stat-item"><span class="stat-val is-convex">${totalConvex}</span><span class="stat-lbl">${totalConvex === 1 ? "convexo" : "convexos"}</span></span>
-      <span class="stat-item"><span class="stat-val is-nonconvex">${totalNonConvex}</span><span class="stat-lbl">${totalNonConvex === 1 ? "não convexo" : "não convexos"}</span></span>
+      ${
+        totalNonConvex > 0
+          ? `<span class="stat-sep" aria-hidden="true">·</span>
+             <span class="stat-item"><span class="stat-val is-nonconvex">${totalNonConvex}</span><span class="stat-lbl">${totalNonConvex === 1 ? "não convexo" : "não convexos"}</span></span>`
+          : ""
+      }
     `;
 
     const segKeys = ["all", "johnson", "elementares", "prismas", "antiprismas", "arquimedianos", "platonicos"];
@@ -405,10 +410,9 @@
       list = [...list].sort((a, b) => (b.global_count || 0) - (a.global_count || 0) || (b.nonconvex_count || 0) - (a.nonconvex_count || 0) || a.sort_key - b.sort_key);
     }
 
-    $("#segment-def-text").textContent = getSegmentDefinition(state.segment);
     const solvedCount = list.filter((s) => s.has_global).length;
-    const totalMinima = list.reduce((acc, s) => acc + (s.global_count || 0), 0);
-    $("#catalog-meta-bar").textContent = `${list.length} sólidos · ${solvedCount} com mínimo global (${totalMinima} soluções)`;
+    const metaEl = $("#catalog-meta-bar");
+    if (metaEl) metaEl.textContent = `${solvedCount}/${list.length}`;
 
     const gridEl = $("#cat-grid");
     const tableWrap = $("#cat-table-wrap");
@@ -468,21 +472,18 @@
       const imgUrl = getRenderUrl(solid, sol, "iso", state.galleryShowDiagonals, true);
       const isAboveFold = index < 8;
 
-      const leftBadge = sol.is_convex
-        ? `<span class="badge badge-convex photo-badge-tl">Convexo</span>`
-        : `<span class="badge badge-nonconvex photo-badge-tl">Não convexo</span>`;
-
-      let rightBadge = "";
+      let cornerBadge = "";
       if (solid.convex_count > 0 && solid.nonconvex_count > 0) {
-        rightBadge = `<span class="badge badge-nonconvex photo-badge-tr">+${solid.nonconvex_count} não conv.</span>`;
+        cornerBadge = `<span class="badge badge-nonconvex photo-badge-tr">+${solid.nonconvex_count} não convexo</span>`;
+      } else if (!sol.is_convex) {
+        cornerBadge = `<span class="badge badge-nonconvex photo-badge-tr">Não convexo</span>`;
       } else if (solid.global_count > 1) {
-        rightBadge = `<span class="badge ${sol.is_convex ? "badge-ime" : "badge-nonconvex"} photo-badge-tr">${solid.global_count} globais</span>`;
+        cornerBadge = `<span class="badge badge-ime photo-badge-tr">${solid.global_count} globais</span>`;
       }
 
       photoHtml = `
         <div class="photo-stage">
-          ${leftBadge}
-          ${rightBadge}
+          ${cornerBadge}
           <div class="photo-loading"><div class="photo-placeholder-mark"></div></div>
           <img
             data-atlas-img="1"
@@ -502,9 +503,9 @@
 
     const topo = solid.topology || {};
     const topoShort = solid.has_topology
-      ? `V:${topo.vertices} · F:${topo.faces} · E:${topo.edges}`
+      ? `V ${topo.vertices} · F ${topo.faces} · E ${topo.edges}`
       : topo.vertices
-        ? `V:${topo.vertices} · pendente`
+        ? `V ${topo.vertices} · pendente`
         : "pendente";
 
     const redundantCode = solid.display_code.trim().toLowerCase() === solid.name_pt.trim().toLowerCase();
@@ -513,25 +514,12 @@
       : `<span class="solid-code">${esc(solid.display_code)}</span>`;
 
     let topRight = "";
-    if (hasPhoto) {
-      if (solid.global_count > 1) {
-        topRight = `<span class="badge badge-ime">${solid.global_count} globais</span>`;
-      } else {
-        topRight = `<span class="solid-energy">${fmtSci(sol.fval, 1)}</span>`;
-      }
+    if (solid.global_count > 1) {
+      topRight = `<span class="solid-micro-tag">${solid.global_count} globais</span>`;
     } else if (solid.is_elementary && state.segment !== "elementares") {
-      topRight = `<span class="badge badge-elem">Elementar</span>`;
+      topRight = `<span class="solid-micro-tag">Elementar</span>`;
     }
 
-    const subTags = [];
-    if (hasPhoto && solid.is_elementary && state.segment !== "elementares") {
-      subTags.push(`<span class="badge badge-elem">Elementar</span>`);
-    }
-    if (hasPhoto && state.segment === "all" && !redundantCode) {
-      subTags.push(`<span class="badge badge-neutral">${esc(solid.family === "Sólidos de Johnson" ? "Johnson" : solid.family)}</span>`);
-    }
-
-    const subTagsHtml = subTags.length ? `<div class="solid-sub-tags">${subTags.join("")}</div>` : "";
     const footRight = solid.has_topology && topo.face_signature ? `<span>${esc(topo.face_signature)}</span>` : "";
 
     return `
@@ -540,10 +528,9 @@
         <div class="solid-card-body">
           <div class="solid-card-top">
             ${codeHtml}
-            <div class="solid-top-tags">${topRight}</div>
+            ${topRight}
           </div>
           <div class="solid-name-pt">${esc(solid.name_pt)}</div>
-          ${subTagsHtml}
           <div class="solid-foot-row">
             <span>${topoShort}</span>
             ${footRight}
@@ -570,7 +557,7 @@
         }
 
         const segTag = s.is_elementary
-          ? `<span class="badge badge-elem" style="margin-left:5px;">Elem.</span>`
+          ? `<span class="badge badge-ime" style="margin-left:5px;">Elem.</span>`
           : "";
 
         return `
@@ -787,7 +774,7 @@
 
     const headerBadges = [
       `<span class="badge badge-ime">${esc(detail.family)}</span>`,
-      detail.is_elementary ? `<span class="badge badge-elem">Elementar · Zalgaller</span>` : "",
+      detail.is_elementary ? `<span class="badge badge-ime">Elementar · Zalgaller</span>` : "",
       detail.has_topology
         ? `<span class="mono">V = ${topo.vertices} · F = ${topo.faces} · E = ${topo.edges} · χ = ${topo.euler ?? "—"}</span>`
         : `<span class="mono">Topologia pendente</span>`,
@@ -1599,8 +1586,8 @@
     $("#btn-gallery-diagonals").addEventListener("click", (e) => {
       state.galleryShowDiagonals = !state.galleryShowDiagonals;
       const active = state.galleryShowDiagonals;
-      e.currentTarget.textContent = `Diagonais: ${active ? "On" : "Off"}`;
       e.currentTarget.classList.toggle("is-on", active);
+      e.currentTarget.setAttribute("aria-pressed", String(active));
       renderCatalog();
     });
 
