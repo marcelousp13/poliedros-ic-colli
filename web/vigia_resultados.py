@@ -42,7 +42,11 @@ if str(WEB_DIR) not in sys.path:
     sys.path.insert(0, str(WEB_DIR))
 
 from geometry_analyzer import iter_global_category_dirs
-from github_sync import load_github_config, sync_global_solutions_to_github
+from github_sync import (
+    has_worker_credentials,
+    load_github_config,
+    sync_global_solutions_to_github,
+)
 
 
 def _snapshot_global_files(solidos_dir: Path) -> Dict[str, float]:
@@ -66,10 +70,16 @@ def _snapshot_global_files(solidos_dir: Path) -> Dict[str, float]:
 class AutomaticResultWatcher:
     """Thread leve que monitora solidos/*/globais/ e envia descobertas ao GitHub com debounce."""
 
-    def __init__(self, poll_seconds: float = 2.0, debounce_seconds: float = 4.0):
+    def __init__(
+        self,
+        poll_seconds: float = 2.0,
+        debounce_seconds: float = 4.0,
+        only_solidos: bool = True,
+    ):
         self.solidos_dir = PROJECT_ROOT / "solidos"
         self.poll_seconds = poll_seconds
         self.debounce_seconds = debounce_seconds
+        self.only_solidos = only_solidos
         self._stop_evt = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -82,9 +92,10 @@ class AutomaticResultWatcher:
         if self._thread:
             self._thread.join(timeout=3.0)
         # Sincronização final garantida antes de encerrar
-        ok, msg, count = sync_global_solutions_to_github()
+        ok, msg, count = sync_global_solutions_to_github(only_solidos=self.only_solidos)
         if count > 0:
-            print(f"\n[Atlas Auto-Sync] ✓ {count} arquivo(s) enviado(s) ao GitHub — {msg}", flush=True)
+            prefix = "✓" if ok else "✗"
+            print(f"\n[Atlas Auto-Sync] {prefix} {count} arquivo(s) processado(s) — {msg}", flush=True)
 
     def _loop(self):
         last_snap = _snapshot_global_files(self.solidos_dir)
@@ -100,7 +111,7 @@ class AutomaticResultWatcher:
             if pending_since is not None and (time.time() - pending_since) >= self.debounce_seconds:
                 pending_since = None
                 try:
-                    ok, msg, count = sync_global_solutions_to_github()
+                    ok, msg, count = sync_global_solutions_to_github(only_solidos=self.only_solidos)
                     if count > 0:
                         prefix = "✓" if ok else "✗"
                         print(f"\n[Atlas Auto-Sync] {prefix} {msg} ({count} arq.)", flush=True)
@@ -136,11 +147,13 @@ def main():
     if args.executar_main:
         main_script = PROJECT_ROOT / "standbyalone2.py"
         os.chdir(str(PROJECT_ROOT))
+        os.environ["ATLAS_WATCHER_ACTIVE"] = "1"
         try:
             runpy.run_path(str(main_script), run_name="__main__")
         except KeyboardInterrupt:
             pass
         finally:
+            os.environ.pop("ATLAS_WATCHER_ACTIVE", None)
             watcher.stop_and_flush()
     else:
         print("[Atlas Auto-Sync] Observando solidos/ em segundo plano... (Ctrl+C para encerrar)")

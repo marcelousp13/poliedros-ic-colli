@@ -58,6 +58,7 @@ _ensure_conda_dll_paths()
 WEB_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = WEB_DIR.parent
 CONFIG_PATH = WEB_DIR / "config_github.json"
+WORKER_CONFIG_PATH = WEB_DIR / "config_worker.json"
 SENT_STATE_PATH = WEB_DIR / "cache" / "enviados_github.json"
 
 if str(PROJECT_ROOT) not in sys.path:
@@ -79,13 +80,30 @@ IGNORED_REL_PATHS = {
 
 
 def load_github_config() -> Optional[Dict[str, str]]:
-    """Carrega configuração de web/config_github.json ou variáveis de ambiente."""
+    """
+    Carrega configuração combinando:
+      1. web/config_worker.json (público no repo: worker_url, owner, repo, branch)
+      2. web/config_github.json (local, ignorado no Git: autor, team_key e/ou token)
+      3. Variáveis de ambiente (ATLAS_WORKER_URL, ATLAS_TEAM_KEY, ATLAS_AUTOR, GITHUB_TOKEN, etc.)
+    """
     cfg: Dict[str, str] = {}
+    if WORKER_CONFIG_PATH.exists():
+        try:
+            w_cfg = json.loads(WORKER_CONFIG_PATH.read_text(encoding="utf-8"))
+            if isinstance(w_cfg, dict):
+                cfg.update(w_cfg)
+        except Exception:
+            pass
+
     if CONFIG_PATH.exists():
         try:
-            cfg = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+            l_cfg = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+            if isinstance(l_cfg, dict):
+                for k, v in l_cfg.items():
+                    if v is not None and str(v).strip() != "":
+                        cfg[k] = v
         except Exception:
-            cfg = {}
+            pass
 
     if os.environ.get("GITHUB_REPO") and "/" in os.environ["GITHUB_REPO"]:
         owner, repo = os.environ["GITHUB_REPO"].split("/", 1)
@@ -97,10 +115,19 @@ def load_github_config() -> Optional[Dict[str, str]]:
         cfg["branch"] = os.environ["GITHUB_BRANCH"].strip()
     if os.environ.get("ATLAS_AUTOR"):
         cfg["autor"] = os.environ["ATLAS_AUTOR"].strip()
+    if os.environ.get("ATLAS_WORKER_URL"):
+        cfg["worker_url"] = os.environ["ATLAS_WORKER_URL"].strip()
+    if os.environ.get("ATLAS_TEAM_KEY"):
+        cfg["team_key"] = os.environ["ATLAS_TEAM_KEY"].strip()
 
     owner = (cfg.get("owner") or "").strip()
     repo = (cfg.get("repo") or "").strip()
     token = (cfg.get("token") or "").strip()
+    if token == "COLE_SEU_TOKEN_GITHUB_AQUI":
+        token = ""
+    worker_url = (cfg.get("worker_url") or "").strip().rstrip("/")
+    team_key = (cfg.get("team_key") or "").strip()
+
     if not owner or not repo or owner == "SEU_USUARIO_GITHUB":
         return None
     return {
@@ -108,8 +135,114 @@ def load_github_config() -> Optional[Dict[str, str]]:
         "repo": repo,
         "branch": (cfg.get("branch") or "main").strip(),
         "token": token,
+        "worker_url": worker_url,
+        "team_key": team_key,
         "autor": (cfg.get("autor") or os.environ.get("USERNAME") or "Pesquisador").strip(),
     }
+
+
+def has_worker_credentials(cfg: Optional[Dict[str, str]]) -> bool:
+    return bool(cfg and cfg.get("worker_url") and cfg.get("team_key"))
+
+
+def has_remote_publish_credentials(cfg: Optional[Dict[str, str]]) -> bool:
+    return bool(cfg and (has_worker_credentials(cfg) or cfg.get("token")))
+
+
+def _http_json_request(
+    method: str,
+    url: str,
+    headers: Optional[Dict[str, str]] = None,
+    payload: Optional[Dict[str, Any]] = None,
+    timeout: int = 45,
+) -> Tuple[int, Any]:
+    req_headers = dict(headers or {})
+    data = None
+    if payload is not None:
+        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        req_headers.setdefault("Content-Type", "application/json; charset=utf-8")
+
+    for ctx in (_SSL_CTX, _SSL_UNVERIFIED_CTX):
+        req = urllib.request.Request(url, data=data, headers=req_headers, method=method)
+        try:
+            with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
+                raw = resp.read().decode("utf-8", errors="replace")
+                return resp.status, (json.loads(raw) if raw else {})
+        except urllib.error.HTTPError as e:
+            raw = e.read().decode("utf-8", errors="replace")
+            try:
+                body = json.loads(raw) if raw else {"message": str(e)}
+            except Exception:
+                body = {"message": raw or str(e)}
+            return e.code, body
+        except urllib.error.URLError as e:
+            if isinstance(getattr(e, "reason", None), ssl.SSLError) and ctx is _SSL_CTX:
+                continue
+            return 0, {"message": f"Falha de rede/SSL: {e}"}
+        except Exception as e:
+            return 0, {"message": str(e)}
+    return 0, {"message": "Falha de conexão HTTP."}
+
+
+def test_worker_connection(cfg: Dict[str, str]) -> Tuple[bool, str]:
+    worker_url = (cfg.get("worker_url") or "").strip().rstrip("/")
+    if not worker_url:
+        return False, "URL do Cloudflare Worker não configurada em web/config_worker.json."
+    status, data = _http_json_request(
+        "GET",
+        f"{worker_url}/health",
+        headers={"User-Agent": "IC-com-Colli-Atlas-Sync/1.0"},
+        timeout=15,
+    )
+    if status == 200 and isinstance(data, dict) and data.get("ok"):
+        if not data.get("configured", True):
+            return False, "Worker online, mas faltam os Secrets GITHUB_TOKEN ou TEAM_KEY no Cloudflare."
+        return True, f"Worker online ({data.get('repo', cfg['owner'] + '/' + cfg['repo'])})."
+    msg = data.get("message", str(data)) if isinstance(data, dict) else str(data)
+    return False, f"Worker inacessível ({status}): {msg}"
+
+
+def push_files_via_worker(
+    cfg: Dict[str, str],
+    files: List[Tuple[str, bytes]],
+    commit_message: str,
+) -> Tuple[bool, str]:
+    """
+    Envia mínimos globais validados através do Cloudflare Worker da equipe.
+    Não exige token do GitHub na máquina do pesquisador — usa apenas a chave da equipe.
+    """
+    if not files:
+        return True, "Nenhum arquivo para enviar."
+    worker_url = (cfg.get("worker_url") or "").strip().rstrip("/")
+    team_key = (cfg.get("team_key") or "").strip()
+    if not worker_url or not team_key:
+        return False, "Cloudflare Worker ou chave da equipe não configurados."
+
+    payload = {
+        "autor": cfg.get("autor") or "Pesquisador",
+        "commit_message": commit_message,
+        "files": [
+            {
+                "path": rel_posix,
+                "content_base64": base64.b64encode(raw_bytes).decode("ascii"),
+            }
+            for rel_posix, raw_bytes in files
+        ],
+    }
+    status, data = _http_json_request(
+        "POST",
+        f"{worker_url}/submit",
+        headers={
+            "X-Team-Key": team_key,
+            "User-Agent": "IC-com-Colli-Atlas-Sync/1.0",
+        },
+        payload=payload,
+        timeout=60,
+    )
+    if status == 200 and isinstance(data, dict) and data.get("ok"):
+        return True, data.get("message") or "Enviado via Cloudflare Worker."
+    msg = data.get("message", str(data)) if isinstance(data, dict) else str(data)
+    return False, f"Erro Worker ({status}): {msg}"
 
 
 def _gh_request(method: str, url: str, token: str, payload: Optional[Dict[str, Any]] = None) -> Tuple[int, Any]:
@@ -365,9 +498,28 @@ def save_sent_registry(reg: Dict[str, str]):
 
 
 def _fetch_remote_json_file(cfg: Dict[str, str], rel_posix: str) -> Optional[Any]:
-    """Busca e decodifica um arquivo JSON do repositório GitHub remoto (se existir)."""
+    """
+    Busca e decodifica um arquivo JSON do repositório GitHub remoto (se existir).
+    Quando não há token GitHub local (modo Cloudflare Worker), lê via raw.githubusercontent.com
+    para evitar o limite de 60 req/hora da API não autenticada do GitHub.
+    """
     if not cfg or not cfg.get("owner") or not cfg.get("repo"):
         return None
+    if not cfg.get("token"):
+        raw_url = (
+            f"https://raw.githubusercontent.com/{cfg['owner']}/{cfg['repo']}/"
+            f"{cfg['branch']}/{rel_posix}?t={int(time.time())}"
+        )
+        st, data = _http_json_request(
+            "GET",
+            raw_url,
+            headers={"User-Agent": "IC-com-Colli-Atlas-Sync/1.0"},
+            timeout=20,
+        )
+        if st == 200:
+            return data
+        return None
+
     url = f"https://api.github.com/repos/{cfg['owner']}/{cfg['repo']}/contents/{rel_posix}?ref={cfg['branch']}"
     status, data = _gh_request("GET", url, cfg.get("token", ""))
     if status != 200 or not isinstance(data, dict):
@@ -446,19 +598,21 @@ def _get_existing_site_solutions_for_solid(
             _absorb_solution_list(raw_remote)
 
         # Também consulta eventuais JSONs recém-enviados em solidos/<solid_id>/minimos_globais/ no GitHub
-        for cat_sub in ("convexos", "nao_convexos"):
-            dir_url = (
-                f"https://api.github.com/repos/{cfg['owner']}/{cfg['repo']}/contents/"
-                f"solidos/{solid_id}/minimos_globais/{cat_sub}/sem_autointersecao?ref={cfg['branch']}"
-            )
-            st, items = _gh_request("GET", dir_url, cfg.get("token", ""))
-            if st == 200 and isinstance(items, list):
-                for item in items:
-                    if isinstance(item, dict) and str(item.get("name", "")).endswith(".json"):
-                        r_sol = _fetch_remote_json_file(cfg, item["path"])
-                        if isinstance(r_sol, dict) and r_sol.get("vc"):
-                            r_sol["solution_id"] = Path(item["name"]).stem
-                            _absorb_solution_list([r_sol])
+        # (somente quando há token GitHub local, para não esgotar rate limit da API pública)
+        if cfg.get("token"):
+            for cat_sub in ("convexos", "nao_convexos"):
+                dir_url = (
+                    f"https://api.github.com/repos/{cfg['owner']}/{cfg['repo']}/contents/"
+                    f"solidos/{solid_id}/minimos_globais/{cat_sub}/sem_autointersecao?ref={cfg['branch']}"
+                )
+                st, items = _gh_request("GET", dir_url, cfg.get("token", ""))
+                if st == 200 and isinstance(items, list):
+                    for item in items:
+                        if isinstance(item, dict) and str(item.get("name", "")).endswith(".json"):
+                            r_sol = _fetch_remote_json_file(cfg, item["path"])
+                            if isinstance(r_sol, dict) and r_sol.get("vc"):
+                                r_sol["solution_id"] = Path(item["name"]).stem
+                                _absorb_solution_list([r_sol])
 
     return site_solutions
 
@@ -466,6 +620,7 @@ def _get_existing_site_solutions_for_solid(
 def sync_global_solutions_to_github(
     solid_filter: Optional[str] = None,
     force_all: bool = False,
+    only_solidos: Optional[bool] = None,
 ) -> Tuple[bool, str, int]:
     """
     Executa a verificação científica de 4 passos sobre os mínimos da pasta solidos/:
@@ -473,7 +628,11 @@ def sync_global_solutions_to_github(
       2. Verifica se já existe um mínimo para esse sólido no site (local + GitHub)
       3. Verifica se é igual (isomorfismo métrico via backtracking)
       4. Se for igual, descarta; se for novo e cumprir todas as exigências científicas,
-         adiciona no site (atualizando docs/) e envia ao GitHub.
+         envia ao GitHub (via Cloudflare Worker ou API) para o GitHub Actions atualizar o site.
+
+    Quando `only_solidos=True` (padrão no modo Cloudflare Worker e no vigia automático),
+    envia apenas os arquivos de solidos/<Sólido>/minimos_globais/.../sem_autointersecao/
+    e deixa o GitHub Actions reconstruir docs/ sem conflitos entre múltiplos pesquisadores.
     """
     from construir_site_estatico import _compute_geom_hash, build_static_atlas, safe_slug
     from geometry_analyzer import CatalogService
@@ -482,10 +641,13 @@ def sync_global_solutions_to_github(
     from verificadores.isomorfismo import construir_matriz_distancias
 
     cfg = load_github_config()
+    use_worker = has_worker_credentials(cfg)
     has_git = bool(shutil.which("git") and (PROJECT_ROOT / ".git").exists())
+    if only_solidos is None:
+        only_solidos = use_worker
 
-    # Se GitHub estiver configurado, puxa antes eventuais mínimos novos encontrados pelos colegas
-    if cfg and cfg.get("token"):
+    # Se GitHub estiver configurado no modo completo (não leve), puxa antes eventuais mínimos novos
+    if not only_solidos and cfg and cfg.get("token"):
         try:
             pull_new_minima_from_github()
         except Exception:
@@ -608,57 +770,62 @@ def sync_global_solutions_to_github(
             extra_info = f" ({discarded_equal_count} igual(is) descartado(s), {rejected_invalid_count} inválido(s))"
         return True, f"Nenhum mínimo novo inédito para enviar{extra_info}.", 0
 
-    # Atualiza o site estático local (docs/) para já incluir os novos mínimos, dossiês e renders
+    # Atualiza o site estático local (docs/) apenas quando NÃO estamos em modo somente-solidos
+    # (no modo Worker / multi-máquina, o GitHub Actions reconstrói docs/ sem conflitos entre a equipe)
     solids_label = ", ".join(sorted(solids_touched)[:5])
     if len(solids_touched) > 5:
         solids_label += f" (+{len(solids_touched) - 5})"
-    try:
-        build_static_atlas(PROJECT_ROOT / "docs", presets=list(CAMERA_PRESETS.keys()))
-        docs_dir = PROJECT_ROOT / "docs"
-        already_queued = {r for r, _, _ in files_to_send}
-        # Inclui catalog.json e os arquivos docs/ dos sólidos novos adicionados
-        cat_file = docs_dir / "data" / "catalog.json"
-        if cat_file.is_file():
-            rel_c = cat_file.relative_to(PROJECT_ROOT).as_posix()
-            if rel_c not in already_queued:
-                files_to_send.append((rel_c, cat_file.read_bytes(), f"{cat_file.stat().st_size}:{int(cat_file.stat().st_mtime)}"))
-                already_queued.add(rel_c)
-        for sid in sorted(solids_touched):
-            slug = safe_slug(sid)
-            s_json = docs_dir / "data" / "solids" / f"{slug}.json"
-            if s_json.is_file():
-                rel_s = s_json.relative_to(PROJECT_ROOT).as_posix()
-                if rel_s not in already_queued:
-                    files_to_send.append((rel_s, s_json.read_bytes(), f"{s_json.stat().st_size}:{int(s_json.stat().st_mtime)}"))
-                    already_queued.add(rel_s)
-            for png in (docs_dir / "renders").glob(f"{slug}_*.png"):
-                rel_p = png.relative_to(PROJECT_ROOT).as_posix()
-                if rel_p not in already_queued:
-                    files_to_send.append((rel_p, png.read_bytes(), f"{png.stat().st_size}:{int(png.stat().st_mtime)}"))
-                    already_queued.add(rel_p)
-            s_files_dir = docs_dir / "files" / slug
-            if s_files_dir.is_dir():
-                for df in s_files_dir.rglob("*"):
-                    if df.is_file():
-                        rel_d = df.relative_to(PROJECT_ROOT).as_posix()
-                        if rel_d not in already_queued:
-                            files_to_send.append((rel_d, df.read_bytes(), f"{df.stat().st_size}:{int(df.stat().st_mtime)}"))
-                            already_queued.add(rel_d)
-    except Exception as e:
-        print(f"  [Aviso] Não foi possível atualizar docs/ localmente antes do envio: {e}")
 
-    if cfg is None and not has_git:
+    if not only_solidos:
+        try:
+            build_static_atlas(PROJECT_ROOT / "docs", presets=list(CAMERA_PRESETS.keys()))
+            docs_dir = PROJECT_ROOT / "docs"
+            already_queued = {r for r, _, _ in files_to_send}
+            # Inclui catalog.json e os arquivos docs/ dos sólidos novos adicionados
+            cat_file = docs_dir / "data" / "catalog.json"
+            if cat_file.is_file():
+                rel_c = cat_file.relative_to(PROJECT_ROOT).as_posix()
+                if rel_c not in already_queued:
+                    files_to_send.append((rel_c, cat_file.read_bytes(), f"{cat_file.stat().st_size}:{int(cat_file.stat().st_mtime)}"))
+                    already_queued.add(rel_c)
+            for sid in sorted(solids_touched):
+                slug = safe_slug(sid)
+                s_json = docs_dir / "data" / "solids" / f"{slug}.json"
+                if s_json.is_file():
+                    rel_s = s_json.relative_to(PROJECT_ROOT).as_posix()
+                    if rel_s not in already_queued:
+                        files_to_send.append((rel_s, s_json.read_bytes(), f"{s_json.stat().st_size}:{int(s_json.stat().st_mtime)}"))
+                        already_queued.add(rel_s)
+                for png in (docs_dir / "renders").glob(f"{slug}_*.png"):
+                    rel_p = png.relative_to(PROJECT_ROOT).as_posix()
+                    if rel_p not in already_queued:
+                        files_to_send.append((rel_p, png.read_bytes(), f"{png.stat().st_size}:{int(png.stat().st_mtime)}"))
+                        already_queued.add(rel_p)
+                s_files_dir = docs_dir / "files" / slug
+                if s_files_dir.is_dir():
+                    for df in s_files_dir.rglob("*"):
+                        if df.is_file():
+                            rel_d = df.relative_to(PROJECT_ROOT).as_posix()
+                            if rel_d not in already_queued:
+                                files_to_send.append((rel_d, df.read_bytes(), f"{df.stat().st_size}:{int(df.stat().st_mtime)}"))
+                                already_queued.add(rel_d)
+        except Exception as e:
+            print(f"  [Aviso] Não foi possível atualizar docs/ localmente antes do envio: {e}")
+
+    if not has_remote_publish_credentials(cfg) and not has_git:
         return (
             True,
-            f"Site local (docs/) atualizado com novo(s) mínimo(s) de {solids_label}. "
-            "Para publicar no GitHub, execute web\\configurar_github.bat.",
+            f"Novo(s) mínimo(s) de {solids_label} validado(s) localmente. "
+            "Configure o Worker (web/config_worker.json + chave da equipe) ou web\\configurar_github.bat para enviar ao site.",
             len(files_to_send),
         )
 
     autor = cfg["autor"] if cfg else (os.environ.get("USERNAME") or "Pesquisador")
     msg = f"resultado({solids_label}): novo(s) mínimo(s) global(is) inédito(s) [{autor}]"
 
-    if cfg and cfg.get("token"):
+    if use_worker:
+        ok, info = push_files_via_worker(cfg, [(r, b) for r, b, _ in files_to_send], msg)
+    elif cfg and cfg.get("token"):
         ok, info = push_files_atomic_api(cfg, [(r, b) for r, b, _ in files_to_send], msg)
     else:
         ok, info = push_via_git_cli([r for r, _, _ in files_to_send], msg)

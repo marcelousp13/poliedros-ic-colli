@@ -1,0 +1,12 @@
+name = "poliedros-ic-colli-sync"
+main = "worker.js"
+compatibility_date = "2026-01-01"
+
+[vars]
+GITHUB_OWNER = "marcelousp13"
+GITHUB_REPO = "poliedros-ic-colli"
+GITHUB_BRANCH = "main"
+
+# Secrets (configure via painel do Cloudflare ou via CLI):
+#   npx wrangler secret put GITHUB_TOKEN
+#   npx wrangler secret put TEAM_KEY

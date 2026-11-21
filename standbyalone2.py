@@ -9,6 +9,7 @@
 #   importando e delegando todas as operações para suas classes especializadas.
 # ==============================================================================
 
+import atexit
 import os
 import sys
 from datetime import datetime
@@ -43,6 +44,19 @@ from persistencia.gerenciador_solucoes import GerenciadorSolucoes
 # 7. Exportador 3D para PythonSCAD (geração automática de modelos para mínimos globais)
 from exportadores.pythonscad_exportador import ExportadorPythonSCAD
 
+# 8. Sincronização automática opcional com o site do Atlas (via Cloudflare Worker / GitHub)
+try:
+    from web.auto_conexao import (
+        encerrar_sincronizacao_automatica,
+        iniciar_sincronizacao_automatica,
+    )
+except Exception:
+    def iniciar_sincronizacao_automatica():
+        return None
+
+    def encerrar_sincronizacao_automatica(watcher):
+        return None
+
 
 # ==============================================================================
 # FUNÇÃO PRINCIPAL (MAIN)
@@ -62,6 +76,11 @@ def main():
     print("      INICIAÇÃO CIENTÍFICA COM COLLI - DETERMINAÇÃO DE POLIEDROS")
     print("              OTIMIZAÇÃO VIA SISTEMA DINÂMICO DISSIPATIVO        ")
     print("=" * 80)
+
+    # 0. Ativa o vigia automático em segundo plano (envia mínimos globais inéditos ao site)
+    atlas_watcher = iniciar_sincronizacao_automatica()
+    if atlas_watcher is not None:
+        atexit.register(encerrar_sincronizacao_automatica, atlas_watcher)
 
     # 1. Instanciação das classes de infraestrutura
     carregador = CarregadorTopologia()
@@ -339,6 +358,9 @@ def main():
         print(f" - Mínimos locais (válidos): {contador_locais}")
         print(f" - Mínimos inéditos catalogados: {encontrados}")
         print("=" * 60)
+
+    # Garante o envio final de qualquer mínimo global recém-descoberto antes de encerrar
+    encerrar_sincronizacao_automatica(atlas_watcher)
 
 
 # Ponto de entrada padrão
