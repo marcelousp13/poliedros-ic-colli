@@ -123,23 +123,18 @@ class AutomaticResultWatcher:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Vigia automático de resultados para o Atlas no GitHub")
+    parser = argparse.ArgumentParser(description="Vigia automático de resultados para o Catálogo no GitHub")
     parser.add_argument("--executar-main", action="store_true", help="Roda standbyalone2.py com envio automático em segundo plano")
     parser.add_argument("--agora", action="store_true", help="Apenas sincroniza todos os mínimos globais novos atuais e encerra")
-    parser.add_argument("--pasta", nargs="*", default=[], help="Importa novos mínimos de pasta(s) externa(s) (ex.: pasta de Colli ou Thomas) aplicando os 4 passos")
     args = parser.parse_args()
 
     cfg = load_github_config()
     if cfg:
         print(f"[Atlas Auto-Sync] Conectado a {cfg['owner']}/{cfg['repo']}@{cfg['branch']} (autor: {cfg['autor']})")
     else:
-        print("[Atlas Auto-Sync] Modo local ativo (para sincronizar com GitHub remoto, execute web\\configurar_github.bat).")
+        print("[Atlas Auto-Sync] Modo local ativo (configure web/config_worker.json + chave da equipe).")
 
-    if args.pasta:
-        from importar_solidos import importar_pasta
-        importar_pasta([Path(p) for p in args.pasta], apply_copy=True, update_site=True)
-
-    if args.agora or args.pasta:
+    if args.agora:
         ok, msg, count = sync_global_solutions_to_github()
         print(f"[Atlas Auto-Sync] {'✓' if ok else '✗'} {msg} ({count} arquivo(s))")
         sys.exit(0 if ok else 1)

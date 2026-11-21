@@ -40,6 +40,80 @@ NONCONVEX_SUBDIR_NAMES: Tuple[str, ...] = ("nao_convexos", "não convexos", "nao
 NO_INTERSECTION_SUBDIR_NAMES: Tuple[str, ...] = ("sem_autointersecao", "sem autointerseção", "sem autointersecao")
 
 
+def safe_slug(text: str) -> str:
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "_", text.strip())
+    return slug.strip("_") or "solid"
+
+
+def compute_geom_hash(vertices: List[List[float]], faces: List[List[int]]) -> str:
+    """Hash estável de geometria (vértices + faces) usado para chaves de renderização WebP."""
+    return hashlib.sha1(
+        json.dumps(
+            {"v": [[round(float(c), 6) for c in p] for p in vertices], "f": faces},
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()[:14]
+
+
+def compute_exact_vertices_hash(vertices: List[List[float]], decimals: int = 6) -> str:
+    """Hash rápido auxiliar das coordenadas arredondadas dos vértices."""
+    norm_pts = sorted(
+        (
+            round(float(p[0]), decimals) + 0.0,
+            round(float(p[1]), decimals) + 0.0,
+            round(float(p[2]), decimals) + 0.0,
+        )
+        for p in vertices
+    )
+    return hashlib.sha1(
+        json.dumps(norm_pts, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()[:16]
+
+
+def are_exact_same_vertices(
+    verts_a: Optional[List[List[float]]],
+    verts_b: Optional[List[List[float]]],
+    tol: float = 1e-4,
+) -> bool:
+    """
+    Retorna True se e somente se `verts_a` e `verts_b` representam exatamente os MESMOS
+    vértices no espaço R³ (dentro de tolerância `tol`, sem rotação/translação, aceitando
+    apenas permutação de índices).
+    - Imune a diferenças de arredondamento (8 casas no JSON do site vs 16 casas no bruto).
+    - Dois mínimos isométricos em orientações/posições distintas retornam False e são ambos mantidos.
+    """
+    if not verts_a or not verts_b or len(verts_a) != len(verts_b):
+        return False
+    A = np.asarray(verts_a, dtype=float)
+    B = np.asarray(verts_b, dtype=float)
+    if A.shape != B.shape or A.ndim != 2 or A.shape[1] != 3:
+        return False
+    if float(np.max(np.abs(A - B))) <= tol:
+        return True
+    diff = np.linalg.norm(A[:, None, :] - B[None, :, :], axis=2)
+    used = set()
+    for i in range(len(A)):
+        j = int(np.argmin(diff[i]))
+        if float(diff[i, j]) > tol or j in used:
+            return False
+        used.add(j)
+    return True
+
+
+def find_exact_same_vertices_match(
+    vertices: Optional[List[List[float]]],
+    existing_solutions: List[Dict[str, Any]],
+    tol: float = 1e-4,
+) -> Optional[Dict[str, Any]]:
+    """Retorna a solução existente em `existing_solutions` que possui exatamente os mesmos vértices, ou None."""
+    if not vertices:
+        return None
+    for s in existing_solutions:
+        if are_exact_same_vertices(vertices, s.get("vertices") or s.get("vc"), tol=tol):
+            return s
+    return None
+
+
 def iter_global_category_dirs(solid_dir: Path) -> List[Tuple[Optional[str], Path]]:
     """
     Retorna EXCLUSIVAMENTE as subpastas publicáveis de mínimos globais sem autointerseção:

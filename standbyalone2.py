@@ -12,7 +12,9 @@
 import atexit
 import json
 import os
+import re
 import sys
+import unicodedata
 from datetime import datetime
 import numpy as np
 
@@ -76,6 +78,13 @@ def _detectar_autor_local():
         except Exception:
             pass
     return (os.environ.get("USERNAME") or os.environ.get("USER") or "Pesquisador").strip()
+
+
+def _slug_autor(autor: str) -> str:
+    """Normaliza o nome do pesquisador para compor nomes de arquivo seguros e únicos entre a equipe."""
+    norm = unicodedata.normalize("NFKD", str(autor or "")).encode("ascii", "ignore").decode("ascii")
+    limpo = re.sub(r"[^a-z0-9]+", "", norm.lower())
+    return (limpo[:12] or "user")
 
 
 # ==============================================================================
@@ -159,6 +168,7 @@ def main():
     epsilon_perturbacao = 0.1
     escala_plano_esferografica = 5.0
     autor_local = _detectar_autor_local()
+    autor_tag = _slug_autor(autor_local)
 
     # --------------------------------------------------------------------------
     # LOOP DE PROCESSAMENTO PARA CADA SÓLIDO SELECIONADO
@@ -306,7 +316,7 @@ def main():
                         print("     Salvo em com_autointersecao/ (não publicado no site).")
                     elif convexo:
                         contador_globais_convexos_limpos += 1
-                        nome_solucao = f"solucao_global_convexo_a{rep}_g{contador_globais_convexos_limpos}"
+                        nome_solucao = f"solucao_global_convexo_{autor_tag}_a{rep}_g{contador_globais_convexos_limpos}"
                         print(
                             f"  >> MÍNIMO GLOBAL CONVEXO SEM AUTOINTERSEÇÃO! f(x) = {fval:.6e} "
                             f"| V/V_CH = {info_convexidade['volume_ratio']:.5f} "
@@ -315,7 +325,7 @@ def main():
                         )
                     else:
                         contador_globais_nao_convexos_limpos += 1
-                        nome_solucao = f"solucao_global_nao_convexo_a{rep}_g{contador_globais_nao_convexos_limpos}"
+                        nome_solucao = f"solucao_global_nao_convexo_{autor_tag}_a{rep}_g{contador_globais_nao_convexos_limpos}"
                         motivos = "; ".join(info_convexidade["reasons"])
                         print(
                             f"  >> MÍNIMO GLOBAL NÃO CONVEXO SEM AUTOINTERSEÇÃO (DESCOBERTA)! f(x) = {fval:.6e} "

@@ -1409,7 +1409,7 @@
       <div class="sync-steps">
         <div class="sync-step">
           <div class="sync-step-title">1. Critério de catalogação</div>
-          <div>Todos os mínimos globais <strong>sem autointerseção de faces</strong> (<code>|F(x)| &lt; 10⁻⁶</code>), <strong>convexos ou não convexos</strong> — incluindo recorrências isométricas — integram a ficha do sólido com construção visual PythonSCAD, 3D e estatísticas. Mínimos locais e com autointerseção permanecem apenas no registro local.</div>
+          <div>Todos os mínimos globais <strong>sem autointerseção de faces</strong> (<code>|F(x)| &lt; 10⁻⁶</code>), <strong>convexos ou não convexos</strong> — incluindo recorrências isométricas (exceto quando exatamente os mesmos vértices já estiverem registrados) — integram a ficha do sólido com construção visual PythonSCAD, 3D e dados técnicos.</div>
         </div>
         <div class="sync-step">
           <div class="sync-step-title">2. Execução automática da equipe</div>

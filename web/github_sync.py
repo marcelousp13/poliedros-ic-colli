@@ -72,8 +72,6 @@ if str(WEB_DIR) not in sys.path:
 IGNORED_TOP_DIRS = {
     ".git",
     "__pycache__",
-    "gerador_solidos_extracted",
-    "backup_site_anterior",
 }
 IGNORED_EXTENSIONS = {".pyc", ".pyo", ".rar", ".zip", ".blend", ".blend1", ".log"}
 IGNORED_REL_PATHS = {
@@ -609,13 +607,11 @@ def _get_existing_site_solutions_for_solid(
          (funciona TANTO com token quanto em modo Cloudflare Worker, para que uma máquina enxergue
          imediatamente mínimos enviados segundos atrás por outra máquina antes mesmo do deploy!)
     """
-    from construir_site_estatico import _compute_geom_hash, safe_slug
+    from geometry_analyzer import compute_geom_hash, find_exact_same_vertices_match, safe_slug
     from verificadores.isomorfismo import construir_matriz_distancias
 
     slug = safe_slug(solid_id)
     site_solutions: List[Dict[str, Any]] = []
-
-    seen_exact_keys = set()
 
     def _absorb_solution_list(sol_list: List[Dict[str, Any]]):
         for s in sol_list:
@@ -626,12 +622,10 @@ def _get_existing_site_solutions_for_solid(
             if not check["valid"]:
                 continue
             faces = check["faces_oriented"]
-            gh = s.get("geom_hash") or _compute_geom_hash(verts, faces)
+            gh = s.get("geom_hash") or compute_geom_hash(verts, faces)
             sid_item = s.get("solution_id") or s.get("nome") or f"site_{gh[:8]}"
-            exact_key = (sid_item, gh)
-            if exact_key in seen_exact_keys:
+            if find_exact_same_vertices_match(verts, site_solutions) is not None:
                 continue
-            seen_exact_keys.add(exact_key)
             site_solutions.append({
                 "solution_id": sid_item,
                 "geom_hash": gh,
@@ -725,9 +719,7 @@ def sync_global_solutions_to_github(
     envia apenas os arquivos de solidos/<Sólido>/minimos_globais/.../sem_autointersecao/
     e deixa o GitHub Actions reconstruir docs/ sem conflitos entre múltiplos pesquisadores.
     """
-    from construir_site_estatico import _compute_geom_hash, build_static_atlas, safe_slug
-    from geometry_analyzer import CatalogService
-    from scad_renderer import CAMERA_PRESETS
+    from geometry_analyzer import CatalogService, compute_geom_hash, find_exact_same_vertices_match, safe_slug
     from validador_cientifico import ValidadorCientifico
     from verificadores.isomorfismo import construir_matriz_distancias
 
@@ -791,7 +783,6 @@ def sync_global_solutions_to_github(
 
         # Passo 2: Carrega os mínimos que JÁ existem no site (local + GitHub Pages + GitHub solidos/)
         site_solutions = _get_existing_site_solutions_for_solid(cfg, sid, validador)
-        existing_by_id = {s["solution_id"]: s for s in site_solutions}
         faces_raw = (solids_meta_map.get(sid) or {}).get("faces_raw") or []
 
         for rec, pending_paths in pending_records:
@@ -800,23 +791,21 @@ def sync_global_solutions_to_github(
                 continue
 
             sol_id = analyzed["solution_id"]
-            cand_hash = analyzed.get("geom_hash") or _compute_geom_hash(analyzed["vertices"], analyzed["faces"])
+            matched = find_exact_same_vertices_match(analyzed["vertices"], site_solutions)
 
-            # Caso este arquivo exato já seja o próprio registro que está no site (mesmo ID e geom_hash)
-            if not force_all and sol_id in existing_by_id and existing_by_id[sol_id].get("geom_hash") == cand_hash:
+            # Regra oficial: somente pula se já existirem EXATAMENTE os mesmos vértices no site
+            if not force_all and matched is not None:
+                if matched.get("solution_id") != sol_id:
+                    discarded_equal_count += 1
+                    print(
+                        f"  [JÁ NO SITE · MESMOS VÉRTICES] {sid}/{sol_id} == {matched.get('solution_id')}"
+                    )
                 for rel_posix, _, sig in pending_paths:
                     sent_reg[rel_posix] = sig
                     reg_dirty = True
                 continue
 
-            # ==================================================================
-            # PROTOCOLO DE 4 PASSOS:
-            #   1. Novo mínimo na pasta
-            #   2. Já existe mínimo para esse sólido no site?
-            #   3. Verifica se é igual (isomorfismo métrico)
-            #   4. Se for igual, descarta. Se for novo e cumprir exigências, adiciona.
-            # ==================================================================
-            if force_all and sol_id in existing_by_id and existing_by_id[sol_id].get("geom_hash") == cand_hash:
+            if force_all and matched is not None:
                 check = validador.validar_solucao_global(sid, analyzed["vertices"], analyzed["faces"])
                 if not check["valid"]:
                     rejected_invalid_count += 1
@@ -841,7 +830,6 @@ def sync_global_solutions_to_github(
                 analyzed["already_on_site"] = True
                 analyzed["_dist_matrix"] = construir_matriz_distancias(analyzed["vertices"])
                 site_solutions.append(analyzed)
-                existing_by_id[sol_id] = analyzed
 
             solids_touched.add(sid)
             for rel_posix, p, sig in pending_paths:
@@ -864,6 +852,8 @@ def sync_global_solutions_to_github(
 
     if not only_solidos:
         try:
+            from construir_site_estatico import build_static_atlas
+            from scad_renderer import CAMERA_PRESETS
             build_static_atlas(PROJECT_ROOT / "docs", presets=list(CAMERA_PRESETS.keys()))
             docs_dir = PROJECT_ROOT / "docs"
             already_queued = {r for r, _, _ in files_to_send}
@@ -907,7 +897,7 @@ def sync_global_solutions_to_github(
         )
 
     autor = cfg["autor"] if cfg else (os.environ.get("USERNAME") or "Pesquisador")
-    msg = f"resultado({solids_label}): novo(s) mínimo(s) global(is) inédito(s) [{autor}]"
+    msg = f"resultado({solids_label}): novo(s) mínimo(s) global(is) [{autor}]"
 
     if use_worker:
         ok, info = push_files_via_worker(cfg, [(r, b) for r, b, _ in files_to_send], msg)
@@ -935,11 +925,9 @@ def pull_new_minima_from_github(rebuild_docs: bool = True) -> Tuple[bool, str, i
       4. Se for igual, descarta; se for novo e cumprir todas as exigências, adiciona localmente.
     """
     import re
-    from construir_site_estatico import _load_existing_site_solutions, build_static_atlas
     from exportadores.pythonscad_exportador import ExportadorPythonSCAD
-    from geometry_analyzer import CatalogService
+    from geometry_analyzer import CatalogService, find_exact_same_vertices_match
     from persistencia.gerenciador_solucoes import GerenciadorSolucoes
-    from scad_renderer import CAMERA_PRESETS
     from validador_cientifico import ValidadorCientifico
     from verificadores.isomorfismo import construir_matriz_distancias
     from verificadores.verificador_geometrico import VerificadorGeometrico
@@ -962,7 +950,13 @@ def pull_new_minima_from_github(rebuild_docs: bool = True) -> Tuple[bool, str, i
     if not isinstance(remote_catalog, dict) or not isinstance(remote_catalog.get("solids"), list):
         return False, "Não foi possível ler data/catalog.json do Atlas remoto.", 0
 
-    local_site_map = _load_existing_site_solutions(PROJECT_ROOT / "docs" / "data" / "solids", validador)
+    local_site_map: Dict[str, List[Dict[str, Any]]] = {}
+    if (PROJECT_ROOT / "docs" / "data" / "solids").is_dir():
+        try:
+            from construir_site_estatico import _load_existing_site_solutions
+            local_site_map = _load_existing_site_solutions(PROJECT_ROOT / "docs" / "data" / "solids", validador)
+        except Exception:
+            local_site_map = {}
     sent_reg = load_sent_registry()
     reg_dirty = False
     added_count = 0
@@ -977,7 +971,6 @@ def pull_new_minima_from_github(rebuild_docs: bool = True) -> Tuple[bool, str, i
 
         # Base local combinada: docs/data/solids/ + solidos/<sid>/minimos_globais/
         site_solutions = list(local_site_map.get(sid, []))
-        local_exact_keys = {(s.get("solution_id"), s.get("geom_hash")) for s in site_solutions}
         local_sdir = PROJECT_ROOT / "solidos" / sid
         if local_sdir.is_dir():
             faces_raw = (solids_meta_map.get(sid) or {}).get("faces_raw") or []
@@ -985,9 +978,7 @@ def pull_new_minima_from_github(rebuild_docs: bool = True) -> Tuple[bool, str, i
                 analyzed = catalog_svc._analyze_global_record(sid, faces_raw, rec)
                 if analyzed is None or not analyzed.get("vertices"):
                     continue
-                ek = (analyzed.get("solution_id"), analyzed.get("geom_hash"))
-                if ek not in local_exact_keys:
-                    local_exact_keys.add(ek)
+                if find_exact_same_vertices_match(analyzed["vertices"], site_solutions) is None:
                     analyzed["already_on_site"] = True
                     analyzed["_dist_matrix"] = construir_matriz_distancias(analyzed["vertices"])
                     site_solutions.append(analyzed)
@@ -1016,8 +1007,7 @@ def pull_new_minima_from_github(rebuild_docs: bool = True) -> Tuple[bool, str, i
             if not verts:
                 continue
             r_sid = str(rsol.get("solution_id") or "solucao_global_github")
-            r_gh = rsol.get("geom_hash")
-            if (r_sid, r_gh) in local_exact_keys:
+            if find_exact_same_vertices_match(verts, site_solutions) is not None:
                 continue
             avaliacao = validador.avaliar_novo_minimo_4_passos(
                 sid, rsol, site_solutions, permitir_isometricos=True
@@ -1079,7 +1069,6 @@ def pull_new_minima_from_github(rebuild_docs: bool = True) -> Tuple[bool, str, i
             rsol_copy["already_on_site"] = True
             rsol_copy["_dist_matrix"] = construir_matriz_distancias(verts)
             site_solutions.append(rsol_copy)
-            local_exact_keys.add((r_sid, r_gh))
             added_count += 1
             print(f"  [Atlas Pull · REGISTRO GLOBAL] {sid}/{sol_id} sincronizado localmente (-> {avaliacao['target_tab']}).")
 
@@ -1088,6 +1077,8 @@ def pull_new_minima_from_github(rebuild_docs: bool = True) -> Tuple[bool, str, i
 
     if added_count > 0:
         if rebuild_docs:
+            from construir_site_estatico import build_static_atlas
+            from scad_renderer import CAMERA_PRESETS
             build_static_atlas(PROJECT_ROOT / "docs", presets=list(CAMERA_PRESETS.keys()))
         return True, f"{added_count} novo(s) mínimo(s) sincronizado(s) do Atlas remoto.", added_count
     return True, "Base local já contém todos os mínimos publicados no Atlas.", 0

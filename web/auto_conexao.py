@@ -27,20 +27,13 @@ def _configurar_primeira_vez_worker(cfg: dict) -> Optional[dict]:
     """
     from github_sync import CONFIG_PATH, load_github_config, test_worker_connection
 
-    # Só pergunta em sessões interativas (terminal TTY, Spyder ou IPython/Jupyter)
+    # Só pula o prompt se ATLAS_NON_INTERACTIVE=1 (em Spyder/VS Code/PyCharm/IDLE input() funciona)
     if os.environ.get("ATLAS_NON_INTERACTIVE") == "1":
-        return cfg
-    is_interactive = bool(
-        (sys.stdin and sys.stdin.isatty())
-        or "spyder_kernels" in sys.modules
-        or "ipykernel" in sys.modules
-    )
-    if not is_interactive:
         return cfg
 
     print("\n" + "-" * 72)
     print("  [Atlas Online] Primeira execução nesta máquina!")
-    print("  Os mínimos globais inéditos podem ser enviados automaticamente para:")
+    print("  Todos os mínimos globais (sem autointerseção) podem ser enviados automaticamente para:")
     print(f"  https://{cfg['owner']}.github.io/{cfg['repo']}/")
     print("-" * 72)
 
@@ -152,7 +145,7 @@ def iniciar_sincronizacao_automatica():
             f"({cfg['owner']}/{cfg['repo']}@{cfg['branch']} · autor: {cfg['autor']})"
         )
         print(
-            f"[Atlas Auto-Sync]   Novos mínimos globais inéditos serão verificados e enviados "
+            f"[Atlas Auto-Sync]   Novos mínimos globais (sem autointerseção) serão verificados e enviados "
             f"automaticamente para https://{cfg['owner']}.github.io/{cfg['repo']}/"
         )
 

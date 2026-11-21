@@ -45,12 +45,18 @@ if str(PROJECT_ROOT) not in sys.path:
 if str(WEB_DIR) not in sys.path:
     sys.path.insert(0, str(WEB_DIR))
 
-from PIL import Image
+try:
+    from PIL import Image
+except ImportError:
+    Image = None
 
 from geometry_analyzer import (
     CATALOG_SEGMENTS,
     CatalogService,
     compact_execution_metadata,
+    compute_geom_hash,
+    find_exact_same_vertices_match,
+    safe_slug,
 )
 from scad_renderer import CAMERA_PRESETS, PythonSCADRenderer
 from validador_cientifico import ValidadorCientifico
@@ -59,6 +65,8 @@ from verificadores.isomorfismo import construir_matriz_distancias
 
 def _save_webp_from_image(src_path: Path, dst_webp: Path, max_size: int = 720, quality: int = 88) -> bool:
     """Converte PNG/WebP para WebP otimizado (reduz ~5x a ~17x o peso do site sem perda perceptível)."""
+    if Image is None:
+        return False
     try:
         with Image.open(src_path) as im:
             rgb = im.convert("RGB")
@@ -73,18 +81,8 @@ def _save_webp_from_image(src_path: Path, dst_webp: Path, max_size: int = 720, q
         return False
 
 
-def safe_slug(text: str) -> str:
-    slug = re.sub(r"[^A-Za-z0-9._-]+", "_", text.strip())
-    return slug.strip("_") or "solid"
-
-
 def _compute_geom_hash(vertices: List[List[float]], faces: List[List[int]]) -> str:
-    return hashlib.sha1(
-        json.dumps(
-            {"v": [[round(float(c), 6) for c in p] for p in vertices], "f": faces},
-            separators=(",", ":"),
-        ).encode("utf-8")
-    ).hexdigest()[:14]
+    return compute_geom_hash(vertices, faces)
 
 
 def _load_existing_site_solutions(
@@ -140,12 +138,11 @@ def _load_existing_site_solutions(
                 sol["faces"] = faces
                 sol["verified_official"] = True
 
-            # Evita duplicatas estritamente idênticas (mesmo solution_id e mesmo geom_hash),
+            # Evita apenas duplicatas com EXATAMENTE OS MESMOS vértices no espaço R³ (tolerância numérica),
             # preservando integralmente recorrências isométricas de execuções/amostras distintas
             sol_copy = dict(sol)
             sol_copy["geom_hash"] = sol_copy.get("geom_hash") or _compute_geom_hash(verts, faces)
-            ex_key = (sol_copy.get("solution_id"), sol_copy["geom_hash"])
-            if any((k.get("solution_id"), k.get("geom_hash")) == ex_key for k in kept_for_solid):
+            if find_exact_same_vertices_match(verts, kept_for_solid) is not None:
                 continue
 
             sol_copy["already_on_site"] = True
@@ -275,15 +272,20 @@ def build_static_atlas(
             sol_id = analyzed["solution_id"]
             cand_hash = analyzed.get("geom_hash") or _compute_geom_hash(analyzed["vertices"], analyzed["faces"])
 
-            # Se for exatamente o mesmo registro já indexado no site (mesmo ID e mesmo geom_hash),
-            # vincula os caminhos locais e atualiza metadados técnicos de execução (se disponíveis)
-            if sol_id in existing_by_id and existing_by_id[sol_id].get("geom_hash") == cand_hash:
-                ex = existing_by_id[sol_id]
-                for k in ("scad_path", "json_path", "txt_path"):
-                    if analyzed.get(k):
-                        ex[k] = analyzed[k]
-                if analyzed.get("execucao"):
-                    ex["execucao"] = analyzed["execucao"]
+            # Regra oficial: somente ignora se forem EXATAMENTE os mesmos vértices já registrados no site
+            ex_match = find_exact_same_vertices_match(analyzed["vertices"], site_solutions)
+            if ex_match is not None:
+                if ex_match.get("solution_id") == sol_id:
+                    for k in ("scad_path", "json_path", "txt_path"):
+                        if analyzed.get(k):
+                            ex_match[k] = analyzed[k]
+                if analyzed.get("execucao") and not ex_match.get("execucao"):
+                    ex_match["execucao"] = analyzed["execucao"]
+                if ex_match.get("solution_id") != sol_id:
+                    stats["duplicates_removed"] += 1
+                    print(
+                        f"  [IGNORADO · MESMOS VÉRTICES] {sid}/{sol_id} == {ex_match.get('solution_id')}"
+                    )
                 continue
 
             # ==================================================================

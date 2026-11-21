@@ -6,7 +6,6 @@ on:
     paths:
       - "solidos/**"
       - "docs/**"
-      - "faces.txt"
       - "dados/**"
       - "topologia/**"
       - "verificadores/**"
@@ -44,7 +43,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Validar soluções oficiais, deduplicar por isomorfismo e construir Atlas estático
+      - name: Validar soluções globais (sem autointerseção) e construir catálogo estático
         run: |
           xvfb-run -a python web/construir_site_estatico.py --output docs
 
