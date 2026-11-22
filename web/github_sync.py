@@ -241,8 +241,9 @@ def push_files_via_worker(
     if not worker_url or not team_key:
         return False, "Cloudflare Worker ou chave da equipe não configurados."
 
-    # Envia em lotes de até 24 arquivos (8 soluções completas) para respeitar o limite do Worker (30/req)
-    batch_size = 24
+    # Envia em lotes de até 15 arquivos (5 soluções completas × 3 arquivos):
+    # mantém 5 + 15 = 20 subrequests no Worker (< 50 mesmo se houver retry concorrente 422)
+    batch_size = 15
     total_batches = (len(files) + batch_size - 1) // batch_size
     last_msg = "Enviado via Cloudflare Worker."
     for b_idx in range(total_batches):
@@ -670,6 +671,7 @@ def _get_existing_site_solutions_for_solid(
 
         # 2c. Consulta JSONs em solidos/<solid_id>/minimos_globais/{convexos,nao_convexos}/sem_autointersecao/
         # no GitHub (enxerga commits enviados segundos atrás por outra máquina antes do GitHub Actions terminar!)
+        seen_solution_ids = {s.get("solution_id") for s in site_solutions if s.get("solution_id")}
         sid_enc = urllib.parse.quote(solid_id, safe="")
         tok = cfg.get("token", "")
         for cat_sub in ("convexos", "nao_convexos"):
@@ -681,6 +683,9 @@ def _get_existing_site_solutions_for_solid(
             if st == 200 and isinstance(items, list):
                 for item in items:
                     if not (isinstance(item, dict) and str(item.get("name", "")).endswith(".json")):
+                        continue
+                    stem_name = Path(item["name"]).stem
+                    if stem_name in seen_solution_ids:
                         continue
                     r_sol = None
                     dl_url = item.get("download_url")
@@ -696,8 +701,9 @@ def _get_existing_site_solutions_for_solid(
                     else:
                         r_sol = _fetch_remote_json_file(cfg, item["path"])
                     if isinstance(r_sol, dict) and r_sol.get("vc"):
-                        r_sol["solution_id"] = Path(item["name"]).stem
+                        r_sol["solution_id"] = stem_name
                         _absorb_solution_list([r_sol])
+                        seen_solution_ids.add(stem_name)
 
     return site_solutions
 
@@ -841,8 +847,10 @@ def sync_global_solutions_to_github(
     if not files_to_send:
         extra_info = ""
         if discarded_equal_count > 0 or rejected_invalid_count > 0:
-            extra_info = f" ({discarded_equal_count} igual(is) descartado(s), {rejected_invalid_count} inválido(s))"
-        return True, f"Nenhum mínimo novo inédito para enviar{extra_info}.", 0
+            extra_info = f" ({discarded_equal_count} com mesmos vértices já no site, {rejected_invalid_count} inválido(s))"
+        if solid_filter:
+            return True, f"Nenhum mínimo global novo de '{solid_filter}' para enviar{extra_info}.", 0
+        return True, f"Nenhum mínimo global novo para enviar{extra_info}.", 0
 
     # Atualiza o site estático local (docs/) apenas quando NÃO estamos em modo somente-solidos
     # (no modo Worker / multi-máquina, o GitHub Actions reconstrói docs/ sem conflitos entre a equipe)

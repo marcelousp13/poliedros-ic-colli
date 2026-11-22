@@ -1,8 +1,9 @@
 # ==============================================================================
 # WEB INTERFACE — CONEXÃO AUTOMÁTICA EMBUTIDA NO CÓDIGO PRINCIPAL
 # Permite que Marcelo, Thomas e Prof. Colli rodem APENAS standbyalone2.py
-# (no Spyder, VS Code ou terminal) e tenham envio automático em segundo plano
-# via Cloudflare Worker (ou GitHub API) para o site do Atlas.
+# (no Spyder, VS Code, PyCharm, IDLE ou terminal) e tenham envio automático
+# em lote ao final de cada sólido via Cloudflare Worker (ou GitHub API)
+# para o catálogo público no GitHub Pages.
 # ==============================================================================
 
 import json
@@ -27,26 +28,26 @@ def _configurar_primeira_vez_worker(cfg: dict) -> Optional[dict]:
     """
     from github_sync import CONFIG_PATH, load_github_config, test_worker_connection
 
-    # Só pula o prompt se ATLAS_NON_INTERACTIVE=1 (em Spyder/VS Code/PyCharm/IDLE input() funciona)
     if os.environ.get("ATLAS_NON_INTERACTIVE") == "1":
         return cfg
 
     print("\n" + "-" * 72)
-    print("  [Atlas Online] Primeira execução nesta máquina!")
-    print("  Todos os mínimos globais (sem autointerseção) podem ser enviados automaticamente para:")
+    print("  [Catálogo Online] Primeira execução nesta máquina!")
+    print("  Ao final de cada sólido, os mínimos globais (sem autointerseção)")
+    print("  podem ser enviados automaticamente para o catálogo da pesquisa:")
     print(f"  https://{cfg['owner']}.github.io/{cfg['repo']}/")
     print("-" * 72)
 
     try:
-        resp = input("  Ativar envio automático para o site do Atlas? [S/n]: ").strip().lower()
+        resp = input("  Ativar envio automático para o site? [S/n]: ").strip().lower()
     except (EOFError, KeyboardInterrupt):
         return cfg
 
     if resp in ("n", "nao", "não"):
-        print("  [Atlas] Continuando em modo local nesta execução.\n")
+        print("  [Catálogo] Continuando em modo local nesta execução.\n")
         return cfg
 
-    autor_padrao = cfg.get("autor") or os.environ.get("USERNAME") or "Pesquisador"
+    autor_padrao = cfg.get("autor") or os.environ.get("USERNAME") or os.environ.get("USER") or "Pesquisador"
     try:
         autor = input(f"  Seu nome [{autor_padrao}]: ").strip() or autor_padrao
     except (EOFError, KeyboardInterrupt):
@@ -59,7 +60,7 @@ def _configurar_primeira_vez_worker(cfg: dict) -> Optional[dict]:
             return cfg
 
         if not team_key:
-            print("  [Atlas] Chave não informada; continuando em modo local.\n")
+            print("  [Catálogo] Chave não informada; continuando em modo local.\n")
             return cfg
 
         candidato = dict(cfg)
@@ -77,14 +78,14 @@ def _configurar_primeira_vez_worker(cfg: dict) -> Optional[dict]:
             existente["team_key"] = team_key
             CONFIG_PATH.write_text(json.dumps(existente, indent=2, ensure_ascii=False), encoding="utf-8")
             novo_cfg = load_github_config() or candidato
-            print(f"  [Atlas] ✓ Conectado! {msg} (autor: {autor})\n")
+            print(f"  [Catálogo] ✓ Conectado! {msg} (autor: {autor})\n")
             return novo_cfg
 
         if "TEAM_KEY" in msg or "401" in msg:
-            print(f"  [Atlas] ✗ {msg} (tentativa {tentativa}/3)")
+            print(f"  [Catálogo] ✗ {msg} (tentativa {tentativa}/3)")
             if tentativa < 3:
                 continue
-            print("  [Atlas] Chave inválida; continuando em modo local nesta execução.\n")
+            print("  [Catálogo] Chave inválida; continuando em modo local nesta execução.\n")
             return cfg
 
         # Caso sem internet no momento, salva localmente para tentar quando voltar online
@@ -98,22 +99,21 @@ def _configurar_primeira_vez_worker(cfg: dict) -> Optional[dict]:
         existente["team_key"] = team_key
         CONFIG_PATH.write_text(json.dumps(existente, indent=2, ensure_ascii=False), encoding="utf-8")
         novo_cfg = load_github_config() or candidato
-        print(f"  [Atlas] Aviso ao testar Worker: {msg}")
-        print("  [Atlas] A chave foi salva em web/config_github.json e o envio será tentado automaticamente.\n")
+        print(f"  [Catálogo] Aviso ao testar Worker: {msg}")
+        print("  [Catálogo] A chave foi salva em web/config_github.json e o envio será tentado ao final do sólido.\n")
         return novo_cfg
 
     return cfg
 
 
-def iniciar_sincronizacao_automatica():
+def preparar_sincronizacao_automatica() -> bool:
     """
-    Inicia o vigia automático em segundo plano (thread daemon) a partir do standbyalone2.py.
-    Nunca interrompe nem atrasa o código principal em caso de falta de internet ou erro.
+    Prepara a conexão remota no início de standbyalone2.py (sem thread em segundo plano).
+    Na 1ª execução em uma máquina nova, pede nome + TEAM_KEY uma única vez.
+    Retorna True se o envio automático ao final de cada sólido está ativo.
     """
     if os.environ.get("ATLAS_NO_SYNC") == "1":
-        return None
-    if os.environ.get("ATLAS_WATCHER_ACTIVE") == "1":
-        return None
+        return False
 
     try:
         from github_sync import (
@@ -121,51 +121,107 @@ def iniciar_sincronizacao_automatica():
             has_worker_credentials,
             load_github_config,
         )
-        from vigia_resultados import AutomaticResultWatcher
 
         cfg = load_github_config()
 
-        # Se a URL do Worker já está no repo, mas falta a chave local nesta máquina, pede 1 única vez
         if cfg and cfg.get("worker_url") and not has_remote_publish_credentials(cfg):
             cfg = _configurar_primeira_vez_worker(cfg)
 
         if not has_remote_publish_credentials(cfg):
             if cfg and not cfg.get("worker_url"):
                 print(
-                    "[Atlas] Modo local ativo (para envio automático em equipe, "
+                    "[Catálogo] Modo local ativo (para envio automático em equipe, "
                     "preencha worker_url em web/config_worker.json)."
                 )
             else:
-                print("[Atlas] Modo local ativo nesta execução.")
-            return None
+                print("[Catálogo] Modo local ativo nesta execução.")
+            return False
 
         modo = "Cloudflare Worker" if has_worker_credentials(cfg) else "GitHub API"
         print(
-            f"[Atlas Auto-Sync] ✓ Ativo via {modo} "
+            f"[Catálogo Sync] ✓ Ativo via {modo} "
             f"({cfg['owner']}/{cfg['repo']}@{cfg['branch']} · autor: {cfg['autor']})"
         )
         print(
-            f"[Atlas Auto-Sync]   Novos mínimos globais (sem autointerseção) serão verificados e enviados "
-            f"automaticamente para https://{cfg['owner']}.github.io/{cfg['repo']}/"
+            f"[Catálogo Sync]   Ao final de cada sólido, todos os mínimos globais (sem autointerseção) "
+            f"serão enviados em lote para https://{cfg['owner']}.github.io/{cfg['repo']}/"
+        )
+        return True
+    except Exception as e:
+        print(f"[Catálogo] Aviso: sincronização indisponível ({e}). Seguindo em modo local.")
+        return False
+
+
+def sincronizar_solido_ao_final(nome_solido: str) -> None:
+    """
+    Envia em um único lote ao GitHub todos os novos mínimos globais (sem autointerseção)
+    encontrados para `nome_solido` assim que o sólido termina (ou é interrompido por Ctrl+C).
+    """
+    if os.environ.get("ATLAS_NO_SYNC") == "1":
+        return
+    try:
+        from github_sync import (
+            has_remote_publish_credentials,
+            load_github_config,
+            sync_global_solutions_to_github,
         )
 
-        os.environ["ATLAS_WATCHER_ACTIVE"] = "1"
-        watcher = AutomaticResultWatcher(poll_seconds=2.0, debounce_seconds=4.0, only_solidos=True)
-        watcher.start()
-        return watcher
+        cfg = load_github_config()
+        if not has_remote_publish_credentials(cfg):
+            return
+
+        print(f"\n[Catálogo Sync] Sincronizando resultados globais de '{nome_solido}' com o site...", flush=True)
+        ok, msg, count = sync_global_solutions_to_github(solid_filter=nome_solido, only_solidos=True)
+        if count > 0:
+            if ok:
+                print(f"[Catálogo Sync] ✓ {count} arquivo(s) enviado(s) — {msg}", flush=True)
+                print(
+                    f"[Catálogo Sync]   O catálogo online será atualizado em ~1 minuto: "
+                    f"https://{cfg['owner']}.github.io/{cfg['repo']}/",
+                    flush=True,
+                )
+            else:
+                print(
+                    f"[Catálogo Sync] ✗ Falha ao enviar '{nome_solido}': {msg} "
+                    f"(os arquivos continuam salvos localmente e serão reenviados na próxima execução).",
+                    flush=True,
+                )
+        else:
+            print(f"[Catálogo Sync] {msg}", flush=True)
     except Exception as e:
-        print(f"[Atlas] Aviso: sincronização automática indisponível ({e}). Seguindo em modo local.")
-        return None
+        print(f"[Catálogo Sync] Aviso ao sincronizar '{nome_solido}': {e}", flush=True)
 
 
-def encerrar_sincronizacao_automatica(watcher) -> None:
-    """Garante o envio do último mínimo descoberto antes de encerrar standbyalone2.py."""
-    if watcher is None or getattr(watcher, "_atlas_closed", False):
+def finalizar_sincronizacao_automatica() -> None:
+    """
+    Ao encerrar standbyalone2.py, verifica se restou algum mínimo global pendente de
+    execuções anteriores (ex.: quando ficou sem internet) e envia em lote.
+    """
+    if os.environ.get("ATLAS_NO_SYNC") == "1":
         return
-    watcher._atlas_closed = True
     try:
-        watcher.stop_and_flush()
+        from github_sync import (
+            has_remote_publish_credentials,
+            load_github_config,
+            sync_global_solutions_to_github,
+        )
+
+        cfg = load_github_config()
+        if not has_remote_publish_credentials(cfg):
+            return
+
+        ok, msg, count = sync_global_solutions_to_github(only_solidos=True)
+        if count > 0:
+            prefix = "✓" if ok else "✗"
+            print(f"\n[Catálogo Sync] {prefix} Pendências anteriores: {count} arquivo(s) — {msg}", flush=True)
     except Exception as e:
-        print(f"[Atlas Auto-Sync] Aviso ao finalizar envio: {e}")
-    finally:
-        os.environ.pop("ATLAS_WATCHER_ACTIVE", None)
+        print(f"\n[Catálogo Sync] Aviso ao finalizar sincronização: {e}", flush=True)
+
+
+# Compatibilidade com chamadas antigas
+def iniciar_sincronizacao_automatica():
+    return preparar_sincronizacao_automatica()
+
+
+def encerrar_sincronizacao_automatica(_watcher=None) -> None:
+    finalizar_sincronizacao_automatica()

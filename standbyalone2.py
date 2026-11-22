@@ -1,15 +1,3 @@
-# ==============================================================================
-# PROJETO: Iniciação Científica - IC com Colli
-# PROGRAMA: standbyalone2.py (Documento Principal / Main)
-# AUTOR: Marcelo & Antigravity (Google DeepMind)
-# DESCRIÇÃO: 
-#   Ponto de entrada oficial do programa de determinação e otimização de 
-#   poliedros regulares e sólidos de Johnson via relaxação por gradiente amortecido.
-#   Este arquivo contém ESTRITAMENTE a função main() de orquestração interativa,
-#   importando e delegando todas as operações para suas classes especializadas.
-# ==============================================================================
-
-import atexit
 import json
 import os
 import re
@@ -48,17 +36,21 @@ from persistencia.gerenciador_solucoes import GerenciadorSolucoes
 # 7. Exportador 3D para PythonSCAD (geração automática de modelos para mínimos globais)
 from exportadores.pythonscad_exportador import ExportadorPythonSCAD
 
-# 8. Sincronização automática opcional com o site do Atlas (via Cloudflare Worker / GitHub)
+# 8. Sincronização automática em lote ao final de cada sólido (Cloudflare Worker / GitHub)
 try:
     from web.auto_conexao import (
-        encerrar_sincronizacao_automatica,
-        iniciar_sincronizacao_automatica,
+        finalizar_sincronizacao_automatica,
+        preparar_sincronizacao_automatica,
+        sincronizar_solido_ao_final,
     )
 except Exception:
-    def iniciar_sincronizacao_automatica():
+    def preparar_sincronizacao_automatica():
+        return False
+
+    def sincronizar_solido_ao_final(_nome_solido):
         return None
 
-    def encerrar_sincronizacao_automatica(watcher):
+    def finalizar_sincronizacao_automatica():
         return None
 
 
@@ -101,15 +93,9 @@ def main():
       5. Conferência geométrica rigorosa (sem degenerações)
       6. Salvamento de soluções inéditas e exportação 3D (PythonSCAD)
     """
-    print("\n" + "=" * 80)
-    print("      INICIAÇÃO CIENTÍFICA COM COLLI - DETERMINAÇÃO DE POLIEDROS")
-    print("              OTIMIZAÇÃO VIA SISTEMA DINÂMICO DISSIPATIVO        ")
-    print("=" * 80)
 
-    # 0. Ativa o vigia automático em segundo plano (envia mínimos globais inéditos ao site)
-    atlas_watcher = iniciar_sincronizacao_automatica()
-    if atlas_watcher is not None:
-        atexit.register(encerrar_sincronizacao_automatica, atlas_watcher)
+    # 0. Prepara a conexão com o catálogo online (envio único em lote ao final de cada sólido)
+    atlas_sync_ativo = preparar_sincronizacao_automatica()
 
     # 1. Instanciação das classes de infraestrutura
     carregador = CarregadorTopologia()
@@ -165,7 +151,7 @@ def main():
         print("Opção inválida! Escolha 1 para Hipercubo ou 2 para Projeção Esferográfica.")
 
     # Parâmetro de perturbação cúbica para a projeção esferográfica
-    epsilon_perturbacao = 0.1
+    epsilon_perturbacao = 0.4
     escala_plano_esferografica = 5.0
     autor_local = _detectar_autor_local()
     autor_tag = _slug_autor(autor_local)
@@ -481,8 +467,13 @@ def main():
         print(f" - Formas geométricas inéditas registradas: {encontrados_ineditos}")
         print("=" * 60)
 
-    # Garante o envio final de qualquer mínimo global recém-descoberto antes de encerrar
-    encerrar_sincronizacao_automatica(atlas_watcher)
+        # Envia em lote (1 única sincronização) todos os mínimos globais limpos deste sólido para o site
+        if atlas_sync_ativo:
+            sincronizar_solido_ao_final(nome)
+
+    # Verifica se restou alguma pendência de execuções anteriores (ex.: modo offline)
+    if atlas_sync_ativo:
+        finalizar_sincronizacao_automatica()
 
 
 # Ponto de entrada padrão

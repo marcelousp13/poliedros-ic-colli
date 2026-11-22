@@ -30,7 +30,7 @@ python standbyalone2.py
 
 ### 3. Acompanhar os resultados no catálogo online
 1. Cada mínimo global **sem autointerseção de faces** (convexo ou não convexo) é salvo em `solidos/<Sólido>/minimos_globais/(convexos|nao_convexos)/sem_autointersecao/` com `.json`, `.txt` e `*_pythonscad.py`, incluindo condição inicial (`x₀`), método, amostra atual, tamanho da amostra, energia inicial, iterações e tempo.
-2. O sincronizador em segundo plano envia automaticamente os novos mínimos globais ao repositório GitHub da equipe (ignorando apenas se outra pessoa já registrou exatamente os mesmos vértices).
+2. **Ao final de cada sólido** (inclusive se você interromper com `Ctrl+C`), todos os novos mínimos globais daquele sólido são enviados automaticamente em um único lote ao GitHub (ignorando apenas se outra pessoa já registrou exatamente os mesmos vértices).
 3. Em ~1 minuto, o GitHub Actions valida matematicamente, renderiza as imagens PythonSCAD/OpenSCAD e publica a ficha atualizada com visualização 3D interativa em https://marcelousp13.github.io/poliedros-ic-colli/.
 
 *(Mínimos locais e mínimos globais com autointerseção de faces permanecem apenas no registro local em `solidos/`.)*

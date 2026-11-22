@@ -55,7 +55,7 @@ No repositório do GitHub (`marcelousp13/poliedros-ic-colli`):
 
 Pronto! A partir daí, sempre que você, Thomas ou Prof. Colli rodarem `standbyalone2.py`:
 1. Na **1ª execução**, o `standbyalone2.py` pergunta apenas o nome da pessoa e a `TEAM_KEY` (salva localmente em `web/config_github.json`, ignorado pelo Git).
-2. Da **2ª execução em diante**, é só dar Play no `standbyalone2.py`: cada mínimo global inédito validado sobe pelo Worker → grava em `solidos/...` → dispara o GitHub Actions → atualiza o site público automaticamente em ~1 minuto!
+2. Da **2ª execução em diante**, é só dar Play no `standbyalone2.py`: ao final de cada sólido, todos os novos mínimos globais (sem autointerseção) sobem em lote pelo Worker → gravam em `solidos/...` → disparam o GitHub Actions → atualizam o site público automaticamente em ~1 minuto!
 
 ---
 

@@ -1413,7 +1413,7 @@
         </div>
         <div class="sync-step">
           <div class="sync-step-title">2. Execução automática da equipe</div>
-          <div>Ao rodar <code>standbyalone2.py</code>, cada mínimo global limpo registra condição inicial (<code>x₀</code>), método, amostra atual, tamanho da amostra, energia inicial, iterações e tempo, sendo enviado em lotes ao repositório via Cloudflare Worker.</div>
+          <div>Ao rodar <code>standbyalone2.py</code>, cada mínimo global limpo registra condição inicial (<code>x₀</code>), método, amostra atual, tamanho da amostra, energia inicial, iterações e tempo. Ao final de cada sólido, tudo é enviado em lote ao repositório via Cloudflare Worker.</div>
         </div>
         <div class="sync-step">
           <div class="sync-step-title">3. Otimização de desempenho</div>
